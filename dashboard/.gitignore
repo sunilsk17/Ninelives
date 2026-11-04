@@ -1,0 +1,4 @@
+e2e/.e2e.db*
+test-results/
+playwright-report/
+tsconfig.tsbuildinfo
