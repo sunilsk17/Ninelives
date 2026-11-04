@@ -49,8 +49,10 @@ class Store(ABC):
         concurrency_key: str | None = None,
         deadline: float | None = None,
         schedule_id: str | None = None,
+        events: Sequence[tuple[str, Any]] = (),
     ) -> tuple[WorkflowRecord, bool]:
-        """Insert a PENDING workflow. If ``wf_id`` exists, return it with ``created=False``."""
+        """Insert a PENDING workflow (with an optional copied journal and events). If ``wf_id``
+        exists, return it with ``created=False``."""
 
     @abstractmethod
     async def get_workflow(self, wf_id: str) -> WorkflowRecord | None: ...

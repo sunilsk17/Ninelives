@@ -1,6 +1,6 @@
 [project]
 name = "ninelives"
-version = "0.1.0"
+version = "0.2.0"
 description = "Durable execution for Python workflows and AI agents: survive crashes, resume from the last step, never repeat a paid LLM call."
 readme = "README.md"
 requires-python = ">=3.11"

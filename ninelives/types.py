@@ -26,6 +26,10 @@ class EntryKind(StrEnum):
     SLEEP = "sleep"
     SIGNAL = "signal"
     VALUE = "value"
+    EVENT = "event"
+    CHILD = "child"
+    SEND = "send"
+    PATCH = "patch"
 
 
 class EntryStatus(StrEnum):
@@ -159,6 +163,18 @@ class Signal:
             "created_at": self.created_at,
             "consumed_seq": self.consumed_seq,
         }
+
+
+@dataclass(frozen=True)
+class StartOptions:
+    """How to start a run (``app.start(..., options=StartOptions(...))``)."""
+
+    #: Higher runs are claimed first.
+    priority: int = 0
+    #: Runs sharing a key count together against the workflow's ``key_concurrency``.
+    concurrency_key: str | None = None
+    #: Seconds until the run fails with WorkflowTimeout (overrides the workflow's default).
+    timeout: float | None = None
 
 
 @dataclass

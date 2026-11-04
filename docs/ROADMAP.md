@@ -13,14 +13,14 @@ Status legend: ✅ done · 🚧 in progress · ⏳ planned
 |---|---|---|---|
 | 1 | Schema migrations | Upgrades must not need manual SQL (§4) | ✅ |
 | 2 | One transaction per finished step | Hot-path cost; Postgres queue guidance (§3.3) | ✅ |
-| 3 | `ctx.patched()` versioning | Main production failure mode (§3.1) | ⏳ |
-| 4 | Events: `ctx.set_event` / `app.get_event` | Progress and results while running (§2) | ⏳ |
-| 5 | Child workflows and `ctx.send` | Composition (§2, §5.1) | ⏳ |
-| 6 | Workflow timeouts | Flow control (§2) | ⏳ |
-| 7 | Concurrency limits (global and per key) and priority | Flow control (§3.4) | ⏳ |
-| 8 | Cron schedules | Time-based work (§2) | ⏳ |
-| 9 | Retention / purge | Operations (§2) | ⏳ |
-| 10 | Postgres LISTEN/NOTIFY wake-ups | Latency (§2) | ⏳ |
+| 3 | `ctx.patched()` versioning | Main production failure mode (§3.1) | ✅ |
+| 4 | Events: `ctx.set_event` / `app.get_event` | Progress and results while running (§2) | ✅ |
+| 5 | Child workflows and `ctx.send` | Composition (§2, §5.1) | ✅ |
+| 6 | Workflow timeouts | Flow control (§2) | ✅ |
+| 7 | Concurrency limits (global and per key) and priority | Flow control (§3.4) | ✅ |
+| 8 | Cron schedules | Time-based work (§2) | ✅ |
+| 9 | Retention / purge | Operations (§2) | ✅ |
+| 10 | Postgres LISTEN/NOTIFY wake-ups | Latency (§2) | ✅ |
 | 11 | Testing helpers and a sync client | Developer experience (§4) | ⏳ |
 | 12 | API: tokens, events, schedules, metrics; CLI additions | Operations (§3.6, §4) | ⏳ |
 | 13 | Dashboard: sign-in, search, events, children, schedules | Debuggability (§3.2) | ⏳ |

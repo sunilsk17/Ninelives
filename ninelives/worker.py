@@ -8,6 +8,7 @@ import functools
 import logging
 import os
 import socket
+import time
 import uuid
 from typing import TYPE_CHECKING, Any
 
@@ -38,13 +39,28 @@ class Worker:
         lease_ttl: float = 15.0,
         worker_id: str | None = None,
         shutdown_grace: float = 10.0,
+        retention: float | None = None,
+        schedule_interval: float = 1.0,
     ):
+        """
+        concurrency: workflows this worker executes at once.
+        poll_interval: seconds between checks for work when idle (Postgres wakes earlier on NOTIFY).
+        lease_ttl: seconds a silent worker keeps its claims; recovery after a crash takes this long.
+        shutdown_grace: seconds ``stop()`` waits for running workflows before handing them over.
+        retention: if set, delete finished runs older than this many seconds (checked hourly).
+        schedule_interval: seconds between checks for due schedules.
+        """
         self.app = app
         self.concurrency = concurrency
         self.poll_interval = poll_interval
         self.lease_ttl = lease_ttl
         self.worker_id = worker_id or f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:6]}"
         self.shutdown_grace = shutdown_grace
+        self.retention = retention
+        self.schedule_interval = schedule_interval
+        self._schedules_registered = False
+        self._next_schedule_check = 0.0
+        self._next_purge = 0.0
         #: The current execution of each workflow this worker holds, and its lease token.
         self._running: dict[str, asyncio.Task[None]] = {}
         self._tokens: dict[str, str] = {}
@@ -60,12 +76,46 @@ class Worker:
         log.info("worker %s started (%d workflow types)", self.worker_id, len(self.app.workflows))
         try:
             while not self._stopping.is_set():
+                await self._housekeeping()
                 claimed = await self._claim_once()
                 if claimed == 0:
-                    with contextlib.suppress(asyncio.TimeoutError):
-                        await asyncio.wait_for(self._stopping.wait(), self.poll_interval)
+                    await self._idle()
         finally:
             await self._shutdown()
+
+    async def _idle(self) -> None:
+        """Sleep until new work is announced, the poll interval passes, or stop() is called."""
+        work = asyncio.ensure_future(self.app.store.wait_for_work(self.poll_interval))
+        stop = asyncio.ensure_future(self._stopping.wait())
+        try:
+            await asyncio.wait(
+                {work, stop}, timeout=self.poll_interval * 2, return_when=asyncio.FIRST_COMPLETED
+            )
+        finally:
+            for fut in (work, stop):
+                fut.cancel()
+            await asyncio.gather(work, stop, return_exceptions=True)
+
+    async def _housekeeping(self, force: bool = False) -> None:
+        """Register and fire schedules, and purge old runs. Failures are logged, never fatal."""
+        store = self.app.store
+        clock = time.monotonic()
+        try:
+            if self.app.schedules and not self._schedules_registered:
+                await store.upsert_schedules(list(self.app.schedules.values()), self.app.clock())
+                self._schedules_registered = True
+            if self.app.schedules and (force or clock >= self._next_schedule_check):
+                self._next_schedule_check = clock + self.schedule_interval
+                started = await store.fire_schedules(self.app.clock(), list(self.app.workflows))
+                for run_id in started:
+                    log.info("schedule started %s", run_id)
+            if self.retention is not None and clock >= self._next_purge:
+                self._next_purge = clock + 3600
+                removed = await store.purge(self.app.clock() - self.retention)
+                if removed:
+                    log.info("purged %d finished run(s) older than %ss", removed, self.retention)
+        except Exception:
+            log.exception("worker housekeeping failed; retrying on the next loop")
 
     def stop(self) -> None:
         self._stopping.set()
@@ -76,6 +126,7 @@ class Worker:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         while True:
+            await self._housekeeping(force=True)
             claimed = await self._claim_once()
             if claimed == 0 and not self._running:
                 return
@@ -89,7 +140,12 @@ class Worker:
         if free <= 0:
             return 0
         records = await self.app.store.claim(
-            self.worker_id, self.app.clock(), self.lease_ttl, list(self.app.workflows), free
+            self.worker_id,
+            self.app.clock(),
+            self.lease_ttl,
+            list(self.app.workflows),
+            free,
+            self.app.limits(),
         )
         for rec in records:
             assert rec.lease_token is not None

@@ -2,8 +2,10 @@
 
 from .app import Ninelives, StepFunction, WorkflowFunction
 from .context import StepInfo, WorkflowContext, current_context, step_info
+from .cron import Cron, CronError
 from .errors import (
     Cancelled,
+    ChildFailed,
     NinelivesError,
     NonDeterminismError,
     PermanentError,
@@ -11,22 +13,28 @@ from .errors import (
     StepFailed,
     WorkflowFailed,
     WorkflowNotFound,
+    WorkflowTimeout,
 )
 from .stores import SQLiteStore, Store, open_store
-from .types import RetryPolicy, Status
+from .types import RetryPolicy, Schedule, StartOptions, Status, WorkflowRecord
 from .worker import Worker
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "Cancelled",
+    "ChildFailed",
+    "Cron",
+    "CronError",
     "Ninelives",
     "NinelivesError",
     "NonDeterminismError",
     "PermanentError",
     "RetryPolicy",
     "SQLiteStore",
+    "Schedule",
     "SignalTimeout",
+    "StartOptions",
     "Status",
     "StepFailed",
     "StepFunction",
@@ -37,6 +45,8 @@ __all__ = [
     "WorkflowFailed",
     "WorkflowFunction",
     "WorkflowNotFound",
+    "WorkflowRecord",
+    "WorkflowTimeout",
     "current_context",
     "open_store",
     "step_info",

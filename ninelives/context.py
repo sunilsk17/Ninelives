@@ -21,14 +21,16 @@ from typing import TYPE_CHECKING, Any
 from . import serde
 from .errors import (
     Cancelled,
+    ChildFailed,
     LeaseLost,
     NonDeterminismError,
     PermanentError,
     SerializationError,
     SignalTimeout,
     StepFailed,
+    WorkflowTimeout,
 )
-from .types import EntryKind, EntryStatus, JournalEntry, RetryPolicy, WorkflowRecord
+from .types import EntryKind, EntryStatus, JournalEntry, RetryPolicy, StartOptions, WorkflowRecord
 
 if TYPE_CHECKING:
     from .app import Ninelives, StepSpec
@@ -274,9 +276,35 @@ class WorkflowContext:
             )
         return entry
 
-    def _check_cancel(self) -> None:
+    def _check_live(self) -> None:
         if self.cancel_requested:
             raise Cancelled(f"workflow {self.workflow_id} was cancelled")
+        deadline = self.record.deadline
+        if deadline is not None and self._clock() >= deadline:
+            raise WorkflowTimeout(f"workflow {self.workflow_id} passed its deadline")
+
+    async def _op(self, kind: EntryKind, name: str) -> tuple[int, JournalEntry | None]:
+        """Allocate the next position for a durable operation and return any journaled entry."""
+        self._check_live()
+        while True:
+            seq = await self._next()
+            entry = self._journal.get(seq)
+            if entry is not None and entry.kind == EntryKind.PATCH and kind != EntryKind.PATCH:
+                continue  # the marker of a patched() call this code no longer makes
+            return seq, self._expect(seq, kind, name)
+
+    def _entry(self, seq: int, kind: EntryKind, name: str, output: Any = None) -> JournalEntry:
+        now = self._clock()
+        return JournalEntry(
+            workflow_id=self.workflow_id,
+            seq=seq,
+            kind=kind,
+            name=name,
+            status=EntryStatus.COMPLETED,
+            output=output,
+            started_at=now,
+            completed_at=now,
+        )
 
     async def _write(self, entry: JournalEntry) -> None:
         try:
@@ -303,9 +331,7 @@ class WorkflowContext:
     async def step(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         """Run ``fn`` as a durable step (registered with ``@app.step`` or any callable)."""
         spec = self._app.step_spec(fn)
-        self._check_cancel()
-        seq = await self._next()
-        entry = self._expect(seq, EntryKind.STEP, spec.name)
+        seq, entry = await self._op(EntryKind.STEP, spec.name)
         if entry is not None:
             if entry.status == EntryStatus.COMPLETED:
                 return entry.output
@@ -365,7 +391,7 @@ class WorkflowContext:
                     delay,
                 )
                 await asyncio.sleep(delay)
-                self._check_cancel()
+                self._check_live()
                 continue
             try:
                 value = serde.loads(serde.dumps(result))  # the same value replay will return
@@ -427,9 +453,7 @@ class WorkflowContext:
     # ------------------------------------------------------------------ time
     async def sleep(self, seconds: float) -> None:
         """Durable sleep: survives restarts; long sleeps free the worker entirely."""
-        self._check_cancel()
-        seq = await self._next()
-        entry = self._expect(seq, EntryKind.SLEEP, "sleep")
+        seq, entry = await self._op(EntryKind.SLEEP, "sleep")
         now = self._clock()
         if entry is None:
             entry = JournalEntry(
@@ -457,9 +481,7 @@ class WorkflowContext:
 
         Signals sent before the wait are kept and delivered in order. Raises SignalTimeout.
         """
-        self._check_cancel()
-        seq = await self._next()
-        entry = self._expect(seq, EntryKind.SIGNAL, name)
+        seq, entry = await self._op(EntryKind.SIGNAL, name)
         now = self._clock()
         if entry is None:
             entry = JournalEntry(
@@ -494,9 +516,7 @@ class WorkflowContext:
 
     # ------------------------------------------------------------------ deterministic values
     async def _value(self, name: str, make: Callable[[], Any]) -> Any:
-        self._check_cancel()
-        seq = await self._next()
-        entry = self._expect(seq, EntryKind.VALUE, name)
+        seq, entry = await self._op(EntryKind.VALUE, name)
         if entry is not None:
             return entry.output
         value = serde.loads(serde.dumps(make()))
@@ -524,3 +544,122 @@ class WorkflowContext:
 
     async def random(self) -> float:
         return float(await self._value("random", _random.random))
+
+    # ------------------------------------------------------------------ versioning
+    async def patched(self, patch_id: str) -> bool:
+        """Branch on a code change without breaking runs that started before it.
+
+        Returns True for runs that reach this point with the new code, and False for runs that
+        already passed this point before the change was deployed::
+
+            if await ctx.patched("sms-receipts"):
+                await send_sms(order)     # new behaviour
+            else:
+                await send_email(order)   # what older runs did here
+
+        Once no run from before the change is left, delete the ``patched()`` call and the old
+        branch; the markers it left in journals are skipped automatically.
+        """
+        branch = _current_branch.get()
+        if branch is not None and branch.ctx is self:
+            raise RuntimeError("ctx.patched() cannot be used inside ctx.gather branches")
+        self._check_live()
+        name = f"patch:{patch_id}"
+        upcoming = self._journal.get(self._seq + 1)
+        if upcoming is not None:
+            if upcoming.kind == EntryKind.PATCH and upcoming.name == name:
+                self._seq += 1
+                return True
+            return False  # this run passed here before the patch existed
+        seq = await self._next()
+        await self._write(self._entry(seq, EntryKind.PATCH, name, True))
+        return True
+
+    # ------------------------------------------------------------------ events
+    async def set_event(self, key: str, value: Any) -> None:
+        """Publish ``value`` under ``key`` for anyone outside the workflow (``app.get_event``).
+
+        Setting the same key again overwrites it. Useful for progress, partial results and status.
+        """
+        seq, entry = await self._op(EntryKind.EVENT, f"event:{key}")
+        if entry is not None:
+            return
+        value = serde.loads(serde.dumps(value))
+        record = self._entry(seq, EntryKind.EVENT, f"event:{key}", value)
+        await self._guard(self._store.set_event(self._token, record, key, value, self._clock()))
+        self._journal[seq] = record
+
+    # ------------------------------------------------------------------ child workflows and messages
+    async def start_child(
+        self,
+        workflow: Any,
+        *args: Any,
+        id: str | None = None,
+        options: StartOptions | None = None,
+        **kwargs: Any,
+    ) -> str:
+        """Start another workflow as a child of this one and return its run id.
+
+        The start is durable (a replay does not start it again). The child runs independently;
+        collect its result with ``wait_child``. Cancelling this run cancels the child.
+        """
+        name = self._app._workflow_name(workflow)
+        seq, entry = await self._op(EntryKind.CHILD, f"child:{name}")
+        if entry is not None:
+            return str(entry.output["id"])
+        child_id = id or f"{self.workflow_id}/{seq}"
+        opts = options or StartOptions()
+        spec = self._app.workflows.get(name)
+        timeout = opts.timeout if opts.timeout is not None else (spec.timeout if spec else None)
+        now = self._clock()
+        payload = {"args": serde.to_jsonable(list(args)), "kwargs": serde.to_jsonable(kwargs)}
+        record = self._entry(seq, EntryKind.CHILD, f"child:{name}", {"id": child_id, "workflow": name})
+        await self._guard(
+            self._store.start_child(
+                self._token,
+                record,
+                child_id,
+                name,
+                payload,
+                now,
+                priority=opts.priority,
+                concurrency_key=opts.concurrency_key,
+                deadline=now + timeout if timeout is not None else None,
+            )
+        )
+        self._journal[seq] = record
+        return child_id
+
+    async def wait_child(self, child_id: str, timeout: float | None = None) -> Any:
+        """Wait (durably) for a child started with ``start_child`` and return its output.
+
+        Raises ChildFailed if the child failed or was cancelled, SignalTimeout on ``timeout``.
+        Wait for each child once.
+        """
+        outcome = await self.wait_for_signal(f"child:{child_id}", timeout=timeout)
+        if outcome.get("status") == "SUCCEEDED":
+            return outcome.get("output")
+        raise ChildFailed(child_id, str(outcome.get("status")), outcome.get("error"))
+
+    async def child(
+        self,
+        workflow: Any,
+        *args: Any,
+        id: str | None = None,
+        options: StartOptions | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Start a child workflow and wait for its result."""
+        child_id = await self.start_child(workflow, *args, id=id, options=options, **kwargs)
+        return await self.wait_child(child_id)
+
+    async def send(self, workflow_id: str, name: str, payload: Any = None) -> None:
+        """Send a signal to another run, exactly once (a replay or a crash does not resend it)."""
+        seq, entry = await self._op(EntryKind.SEND, f"send:{name}")
+        if entry is not None:
+            return
+        record = self._entry(seq, EntryKind.SEND, f"send:{name}", {"to": workflow_id})
+        await self._guard(
+            self._store.send_from(self._token, record, workflow_id, name, payload, self._clock())
+        )
+        self._journal[seq] = record

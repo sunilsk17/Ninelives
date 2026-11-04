@@ -350,6 +350,7 @@ class SqlStore(Store):
         concurrency_key: str | None = None,
         deadline: float | None = None,
         schedule_id: str | None = None,
+        events: Sequence[tuple[str, Any]] = (),
     ) -> Script[tuple[WorkflowRecord, bool]]:
         inserted = yield run(
             "INSERT INTO workflows (id, name, status, input, created_at, updated_at, forked_from, fork_seq, "
@@ -372,6 +373,15 @@ class SqlStore(Store):
         if inserted:
             for e in journal:
                 yield run(UPSERT_ENTRY, *_entry_args(e))
+            for key, value in events:
+                yield run(
+                    "INSERT INTO events (workflow_id, key, value, updated_at) VALUES (?,?,?,?) "
+                    "ON CONFLICT (workflow_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                    wf_id,
+                    key,
+                    serde.dumps(value),
+                    now,
+                )
             yield Notify()
         row = yield one(f"SELECT {WF_COLS} FROM workflows WHERE id = ?", wf_id)
         return _wf(row), bool(inserted)
@@ -392,6 +402,7 @@ class SqlStore(Store):
         concurrency_key: str | None = None,
         deadline: float | None = None,
         schedule_id: str | None = None,
+        events: Sequence[tuple[str, Any]] = (),
     ) -> tuple[WorkflowRecord, bool]:
         return await self._run(
             lambda: self._create(
@@ -408,6 +419,7 @@ class SqlStore(Store):
                 concurrency_key=concurrency_key,
                 deadline=deadline,
                 schedule_id=schedule_id,
+                events=events,
             )
         )
 
@@ -865,6 +877,10 @@ class SqlStore(Store):
                 concurrency_key=concurrency_key,
                 deadline=deadline,
             )
+            if not created[1] and created[0].parent_id != entry.workflow_id:
+                raise ValueError(
+                    f"run id {child_id!r} is already used by a run that is not a child of this one"
+                )
             yield run(UPSERT_ENTRY, *_entry_args(entry))
             return created
 

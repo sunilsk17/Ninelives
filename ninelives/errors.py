@@ -30,6 +30,21 @@ class Cancelled(NinelivesError):
     """The workflow was cancelled. Raised inside the workflow at the next durable operation."""
 
 
+class WorkflowTimeout(NinelivesError):
+    """The run passed its deadline. Raised inside the workflow at the next durable operation."""
+
+
+class ChildFailed(NinelivesError):
+    """A child workflow failed or was cancelled. Raised by ctx.wait_child / ctx.child."""
+
+    def __init__(self, child_id: str, status: str, error: dict[str, Any] | None):
+        self.child_id = child_id
+        self.status = status
+        self.error = error
+        detail = f"{error.get('type')}: {error.get('message')}" if error else status
+        super().__init__(f"child workflow {child_id} {status.lower()}: {detail}")
+
+
 class NonDeterminismError(NinelivesError):
     """Workflow code took a different path than the journal recorded."""
 
