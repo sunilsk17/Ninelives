@@ -677,3 +677,188 @@ async def test_worker_that_reclaims_its_own_lapsed_run_replaces_the_stale_execut
     assert calls["slow"] == 2
     rec = await app.get(wf_id)
     assert rec.runs == 2 and rec.recoveries == 1
+
+
+async def test_ctx_gather_numbers_multi_step_branches_deterministically(store: Store) -> None:
+    """Branches with several steps each get round-robin sequence numbers, whatever the timing,
+    so a full replay (here: forks that copy the whole journal) never re-runs a step."""
+    import random
+
+    app = make_app(store)
+    calls = Counter[str]()
+    rng = random.Random(7)
+
+    @app.step()
+    async def work(label: str) -> str:
+        calls[label] += 1
+        await asyncio.sleep(rng.uniform(0, 0.01))
+        return label
+
+    async def branch(name: str, n: int) -> list[str]:
+        return [await work(f"{name}{i}") for i in range(n)]
+
+    @app.workflow()
+    async def flow(ctx):
+        first = await ctx.gather(branch("a", 3), branch("b", 1), branch("c", 4))
+        return [*first, await work("after")]
+
+    expected = [["a0", "a1", "a2"], ["b0"], ["c0", "c1", "c2", "c3"], "after"]
+    wid = await app.start(flow)
+    await app.worker().run_until_idle()
+    assert await app.result(wid) == expected
+    journal = await store.get_journal(wid)
+    assert [e.output for e in journal] == ["a0", "b0", "c0", "a1", "c1", "a2", "c2", "c3", "after"]
+    ran = sum(calls.values())
+    assert ran == 9
+    for _ in range(3):
+        replay = await app.fork(wid, len(journal) + 1)
+        await app.worker().run_until_idle()
+        assert await app.result(replay) == expected
+    assert sum(calls.values()) == ran
+
+
+async def test_raw_asyncio_gather_of_multi_step_branches_is_rejected(store: Store) -> None:
+    app = make_app(store)
+
+    @app.step()
+    async def work(label: str) -> str:
+        return label
+
+    async def branch(name: str) -> list[str]:
+        return [await work(f"{name}0"), await work(f"{name}1")]
+
+    @app.workflow()
+    async def flow(ctx):
+        return await asyncio.gather(branch("a"), branch("b"))
+
+    wid = await app.start(flow)
+    await app.worker().run_until_idle()
+    with pytest.raises(WorkflowFailed) as info:
+        await app.result(wid)
+    assert info.value.error["type"] == "NonDeterminismError"
+    assert "ctx.gather" in info.value.error["message"]
+
+
+async def test_ctx_gather_parks_until_the_earliest_wake_up(store: Store, clock: FakeClock) -> None:
+    app = make_app(store, clock)
+
+    @app.step()
+    async def mark(x: str) -> str:
+        return x
+
+    @app.workflow()
+    async def flow(ctx):
+        async def sleeper() -> str:
+            await ctx.sleep(60)
+            return await mark("slept")
+
+        async def waiter() -> str:
+            return await mark(await ctx.wait_for_signal("go"))
+
+        async def quick() -> str:
+            return await mark("quick")
+
+        return await ctx.gather(sleeper(), waiter(), quick())
+
+    t0 = clock()
+    wid = await app.start(flow)
+    await app.worker().run_until_idle()
+    rec = await app.get(wid)
+    assert rec.status == Status.WAITING and rec.wake_at == t0 + 60
+    await app.signal(wid, "go", "hi")
+    await app.worker().run_until_idle()
+    rec = await app.get(wid)
+    assert rec.status == Status.WAITING and rec.wake_at == t0 + 60  # the signal branch is done
+    clock.advance(61)
+    await app.worker().run_until_idle()
+    assert await app.result(wid) == ["slept", "hi", "quick"]
+    names = [e.name for e in await store.get_journal(wid)]
+    assert names.count("mark") == 3 and names.count("sleep") == 1 and names.count("go") == 1
+
+
+async def test_ctx_gather_raises_the_first_failure_after_all_branches_settle(store: Store) -> None:
+    app = make_app(store)
+    done: list[str] = []
+
+    @app.step(retry=RetryPolicy(max_attempts=1))
+    async def fail() -> None:
+        raise PermanentError("no")
+
+    @app.step()
+    async def slow(x: str) -> str:
+        await asyncio.sleep(0.02)
+        done.append(x)
+        return x
+
+    @app.workflow()
+    async def flow(ctx):
+        async def chain() -> list[str]:
+            return [await slow("s1"), await slow("s2")]
+
+        try:
+            await ctx.gather(fail(), chain())
+        except StepFailed as exc:
+            return f"compensated after {exc.step}"
+        return "unreachable"
+
+    wid = await app.start(flow)
+    await app.worker().run_until_idle()
+    assert await app.result(wid) == "compensated after fail"
+    assert done == ["s1", "s2"]
+
+
+async def test_ctx_gather_cannot_be_nested(store: Store) -> None:
+    app = make_app(store)
+
+    @app.step()
+    async def one() -> int:
+        return 1
+
+    @app.workflow()
+    async def flow(ctx):
+        async def inner() -> list[int]:
+            return await ctx.gather(one(), one())
+
+        return await ctx.gather(inner(), one())
+
+    wid = await app.start(flow)
+    await app.worker().run_until_idle()
+    with pytest.raises(WorkflowFailed) as info:
+        await app.result(wid)
+    assert "cannot be nested" in info.value.error["message"]
+
+
+async def test_ctx_gather_resumes_after_a_crash_mid_branch(store: Store, clock: FakeClock) -> None:
+    app = make_app(store, clock)
+    gate = asyncio.Event()
+    calls = Counter[str]()
+
+    @app.step()
+    async def work(label: str) -> str:
+        calls[label] += 1
+        if label == "b1" and calls[label] == 1:
+            await gate.wait()  # the worker dies while b1 is in flight
+        await asyncio.sleep(0.001 * len(calls))
+        return label
+
+    async def branch(name: str, n: int) -> list[str]:
+        return [await work(f"{name}{i}") for i in range(n)]
+
+    @app.workflow()
+    async def flow(ctx):
+        return await ctx.gather(branch("a", 3), branch("b", 3))
+
+    wid = await app.start(flow)
+    dying = app.worker(lease_ttl=10, worker_id="dying")
+    await dying._claim_once()
+    while calls["b1"] == 0:
+        await asyncio.sleep(0.005)
+    for task in list(dying._running.values()):
+        task.cancel()
+    await asyncio.sleep(0.01)
+    clock.advance(11)
+    await app.worker(worker_id="rescuer").run_until_idle()
+    assert await app.result(wid) == [["a0", "a1", "a2"], ["b0", "b1", "b2"]]
+    assert calls["b1"] == 2 and calls["a0"] == calls["b0"] == 1  # only the in-flight step re-ran
+    seqs = [e.seq for e in await store.get_journal(wid)]
+    assert seqs == list(range(1, 7))

@@ -12,13 +12,22 @@ import inspect
 import logging
 import random as _random
 import uuid as _uuid
+import weakref
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from . import serde
-from .errors import Cancelled, LeaseLost, NonDeterminismError, PermanentError, SignalTimeout, StepFailed
+from .errors import (
+    Cancelled,
+    LeaseLost,
+    NonDeterminismError,
+    PermanentError,
+    SerializationError,
+    SignalTimeout,
+    StepFailed,
+)
 from .types import EntryKind, EntryStatus, JournalEntry, RetryPolicy, WorkflowRecord
 
 if TYPE_CHECKING:
@@ -59,8 +68,56 @@ class StepInfo:
         return f"{self.workflow_id}:{self.seq}"
 
 
+class _Group:
+    """The branches of one ``ctx.gather`` call.
+
+    Sequence numbers are handed out round-robin over the branches that have not finished, so the
+    numbering is a function of the code and the journal only, never of I/O timing. A branch that
+    parks (on a sleep or a signal) keeps its place in the rotation; when the turn reaches it, the
+    other branches wait, and once nobody can move the whole workflow suspends.
+    """
+
+    def __init__(self, size: int):
+        self.active = list(range(size))
+        self.pos = 0
+        self.parked: set[int] = set()
+        self.waiting: set[int] = set()
+        self.changed = asyncio.Condition()
+
+    def turn(self) -> int | None:
+        return self.active[self.pos] if self.active else None
+
+    def advance(self, index: int) -> None:
+        self.pos = (self.active.index(index) + 1) % len(self.active)
+
+    def finish(self, index: int) -> None:
+        i = self.active.index(index)
+        self.active.pop(i)
+        self.waiting.discard(index)
+        if self.active:
+            if i < self.pos:
+                self.pos -= 1
+            self.pos %= len(self.active)
+
+    def stalled(self) -> bool:
+        """The turn sits with a parked branch and every other branch is parked or waiting."""
+        return self.turn() in self.parked and all(i in self.parked or i in self.waiting for i in self.active)
+
+
+class _Stalled(BaseException):
+    """Internal: a branch cannot get its turn this execution because a sibling is parked."""
+
+
+@dataclass(frozen=True)
+class _Branch:
+    ctx: WorkflowContext
+    group: _Group
+    index: int
+
+
 _current_ctx: ContextVar[WorkflowContext | None] = ContextVar("ninelives_ctx", default=None)
 _current_step: ContextVar[StepInfo | None] = ContextVar("ninelives_step", default=None)
+_current_branch: ContextVar[_Branch | None] = ContextVar("ninelives_branch", default=None)
 
 
 def step_info() -> StepInfo:
@@ -100,6 +157,8 @@ class WorkflowContext:
         self._journal = journal
         self._seq = 0
         self.cancel_requested = record.cancel_requested
+        self._main_task = asyncio.current_task()
+        self._raw_tasks: weakref.WeakSet[asyncio.Task[Any]] = weakref.WeakSet()
 
     # ------------------------------------------------------------------ helpers
     @property
@@ -107,9 +166,104 @@ class WorkflowContext:
         """True while the next operation will be answered from the journal."""
         return (self._seq + 1) in self._journal
 
-    def _next(self) -> int:
+    async def _next(self) -> int:
+        """Allocate the sequence number of the next durable operation."""
+        branch = _current_branch.get()
+        if branch is not None and branch.ctx is self:
+            # Inside ctx.gather: wait for this branch's turn, take a number, pass the turn on.
+            group, index = branch.group, branch.index
+            async with group.changed:
+                group.waiting.add(index)
+                group.changed.notify_all()
+                try:
+                    await group.changed.wait_for(lambda: group.turn() == index or group.stalled())
+                finally:
+                    group.waiting.discard(index)
+                if group.turn() != index:
+                    raise _Stalled()
+                self._seq += 1
+                group.advance(index)
+                group.changed.notify_all()
+                return self._seq
+        task = asyncio.current_task()
+        if task is not None and self._main_task is not None and task is not self._main_task:
+            # A raw asyncio task (asyncio.gather / create_task). One durable call per task is
+            # deterministic (it is numbered when the task starts); more is not.
+            if task in self._raw_tasks:
+                raise NonDeterminismError(
+                    f"workflow {self.workflow_id}: a concurrent branch made more than one durable call. "
+                    "Their order would depend on timing; run such branches with ctx.gather(...) instead "
+                    "of asyncio.gather(...)."
+                )
+            self._raw_tasks.add(task)
         self._seq += 1
         return self._seq
+
+    async def gather(self, *aws: Awaitable[Any]) -> list[Any]:
+        """Run branches concurrently and return their results in order, like ``asyncio.gather``.
+
+        Unlike ``asyncio.gather`` it is replay-safe for branches that make several durable calls:
+        sequence numbers are handed out round-robin across the branches. Every branch runs until
+        it finishes or fails; if one fails, the first failure (in argument order) is raised once
+        the others have settled.
+
+        A branch that parks on a long sleep or a signal keeps its place in the rotation, so its
+        siblings pause at their next durable call until it resumes, and the workflow suspends
+        until the earliest wake-up. Branches cannot themselves call ``ctx.gather``.
+        """
+        if not aws:
+            return []
+        current = _current_branch.get()
+        if current is not None and current.ctx is self:
+            for aw in aws:
+                if inspect.iscoroutine(aw):
+                    aw.close()
+            raise RuntimeError("ctx.gather cannot be nested inside another ctx.gather branch")
+        group = _Group(len(aws))
+
+        async def run(index: int, aw: Awaitable[Any]) -> Any:
+            _current_branch.set(_Branch(self, group, index))
+            try:
+                result = await aw
+            except _Suspend:
+                async with group.changed:
+                    group.parked.add(index)
+                    group.changed.notify_all()
+                raise
+            except BaseException:
+                async with group.changed:
+                    if index not in group.parked:
+                        group.finish(index)
+                    group.changed.notify_all()
+                raise
+            async with group.changed:
+                group.finish(index)
+                group.changed.notify_all()
+            return result
+
+        tasks = [asyncio.ensure_future(run(i, aw)) for i, aw in enumerate(aws)]
+        try:
+            await asyncio.wait(tasks)
+        except BaseException:  # this execution is being torn down (lease lost or shutdown)
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        if any(t.cancelled() for t in tasks):
+            raise asyncio.CancelledError()
+        errors = [e for e in (t.exception() for t in tasks) if e is not None]
+        for err in errors:
+            if isinstance(err, _Abandon):
+                raise err
+        for err in errors:
+            if not isinstance(err, (_Suspend, _Stalled)):
+                raise err  # type: ignore[misc]
+        parked = [e for e in errors if isinstance(e, _Suspend)]
+        if parked:
+            wakes = [e.wake_at for e in parked if e.wake_at is not None]
+            names = tuple(dict.fromkeys(n for e in parked for n in e.waiting_for))
+            raise _Suspend(min(wakes) if wakes else None, names)
+        return [t.result() for t in tasks]
 
     def _expect(self, seq: int, kind: EntryKind, name: str) -> JournalEntry | None:
         entry = self._journal.get(seq)
@@ -142,7 +296,7 @@ class WorkflowContext:
         """Run ``fn`` as a durable step (registered with ``@app.step`` or any callable)."""
         spec = self._app.step_spec(fn)
         self._check_cancel()
-        seq = self._next()
+        seq = await self._next()
         entry = self._expect(seq, EntryKind.STEP, spec.name)
         if entry is not None:
             if entry.status == EntryStatus.COMPLETED:
@@ -208,7 +362,21 @@ class WorkflowContext:
                 await asyncio.sleep(delay)
                 self._check_cancel()
                 continue
-            value = serde.loads(serde.dumps(result))  # the same value replay will return
+            try:
+                value = serde.loads(serde.dumps(result))  # the same value replay will return
+            except SerializationError as exc:
+                # A programming error, not a transient one: record the attempt and fail the run.
+                await self._guard(
+                    self._store.finish_attempt(
+                        self._token,
+                        self.workflow_id,
+                        seq,
+                        attempt,
+                        self._clock(),
+                        f"SerializationError: {exc}",
+                    )
+                )
+                raise
             await self._guard(
                 self._store.finish_attempt(self._token, self.workflow_id, seq, attempt, self._clock(), None)
             )
@@ -256,7 +424,7 @@ class WorkflowContext:
     async def sleep(self, seconds: float) -> None:
         """Durable sleep: survives restarts; long sleeps free the worker entirely."""
         self._check_cancel()
-        seq = self._next()
+        seq = await self._next()
         entry = self._expect(seq, EntryKind.SLEEP, "sleep")
         now = self._clock()
         if entry is None:
@@ -286,7 +454,7 @@ class WorkflowContext:
         Signals sent before the wait are kept and delivered in order. Raises SignalTimeout.
         """
         self._check_cancel()
-        seq = self._next()
+        seq = await self._next()
         entry = self._expect(seq, EntryKind.SIGNAL, name)
         now = self._clock()
         if entry is None:
@@ -323,7 +491,7 @@ class WorkflowContext:
     # ------------------------------------------------------------------ deterministic values
     async def _value(self, name: str, make: Callable[[], Any]) -> Any:
         self._check_cancel()
-        seq = self._next()
+        seq = await self._next()
         entry = self._expect(seq, EntryKind.VALUE, name)
         if entry is not None:
             return entry.output

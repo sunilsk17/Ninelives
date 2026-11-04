@@ -60,7 +60,9 @@ select = ["E", "F", "W", "I", "B", "UP", "ASYNC", "SIM", "RUF"]
 ignore = ["E501", "RUF001", "RUF002", "RUF003", "SIM105", "B008", "ASYNC109"]
 
 [tool.ruff.lint.per-file-ignores]
+# Tests and benchmarks poll a database from outside on purpose.
 "tests/*" = ["ASYNC110"]
+"benchmarks/*" = ["ASYNC110", "ASYNC240"]
 
 [tool.mypy]
 python_version = "3.11"
