@@ -22,7 +22,9 @@ class LLM(Protocol):
 
     name: str
 
-    async def complete(self, system: str | None, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]: ...
+    async def complete(
+        self, system: str | None, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+    ) -> dict[str, Any]: ...
 
 
 def text_of(content: Sequence[dict[str, Any]]) -> str:
@@ -30,7 +32,11 @@ def text_of(content: Sequence[dict[str, Any]]) -> str:
 
 
 def tool_calls_of(content: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [{"id": b["id"], "name": b["name"], "input": b.get("input") or {}} for b in content if b.get("type") == "tool_use"]
+    return [
+        {"id": b["id"], "name": b["name"], "input": b.get("input") or {}}
+        for b in content
+        if b.get("type") == "tool_use"
+    ]
 
 
 class AnthropicLLM:
@@ -70,7 +76,9 @@ class AnthropicLLM:
             self._client = anthropic.AsyncAnthropic()
         return self._client
 
-    async def complete(self, system: str | None, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]:
+    async def complete(
+        self, system: str | None, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+    ) -> dict[str, Any]:
         import anthropic
 
         kwargs: dict[str, Any] = {
@@ -85,10 +93,17 @@ class AnthropicLLM:
             kwargs["tools"] = tools
         try:
             if self.fallbacks:
-                response = await self.client.beta.messages.create(**kwargs, betas=[self.FALLBACK_BETA], fallbacks="default")
+                response = await self.client.beta.messages.create(
+                    **kwargs, betas=[self.FALLBACK_BETA], fallbacks="default"
+                )
             else:
                 response = await self.client.messages.create(**kwargs)
-        except (anthropic.BadRequestError, anthropic.AuthenticationError, anthropic.PermissionDeniedError, anthropic.NotFoundError) as exc:
+        except (
+            anthropic.BadRequestError,
+            anthropic.AuthenticationError,
+            anthropic.PermissionDeniedError,
+            anthropic.NotFoundError,
+        ) as exc:
             # Retrying cannot fix these; fail the step at once.
             raise PermanentError(f"{type(exc).__name__}: {exc}") from exc
         # RateLimitError, 5xx and connection errors propagate and are retried by the step's policy.
@@ -120,7 +135,9 @@ class ScriptedLLM:
     prove that recovered agents do not repeat LLM calls.
     """
 
-    def __init__(self, replies: Sequence[Reply] | Callable[[list[dict[str, Any]]], Reply], name: str = "scripted"):
+    def __init__(
+        self, replies: Sequence[Reply] | Callable[[list[dict[str, Any]]], Reply], name: str = "scripted"
+    ):
         self.name = name
         self._replies = replies
         self.calls = 0
@@ -132,7 +149,16 @@ class ScriptedLLM:
     @staticmethod
     def call(name: str, input: dict[str, Any], *, id: str | None = None, text: str | None = None) -> Reply:
         blocks: list[dict[str, Any]] = [{"type": "text", "text": text}] if text else []
-        blocks.append({"type": "tool_use", "id": id or "toolu_" + hashlib.sha1(f"{name}:{json.dumps(input, sort_keys=True)}".encode()).hexdigest()[:12], "name": name, "input": input})
+        blocks.append(
+            {
+                "type": "tool_use",
+                "id": id
+                or "toolu_"
+                + hashlib.sha1(f"{name}:{json.dumps(input, sort_keys=True)}".encode()).hexdigest()[:12],
+                "name": name,
+                "input": input,
+            }
+        )
         return {"content": blocks, "stop_reason": "tool_use"}
 
     @staticmethod
@@ -142,9 +168,15 @@ class ScriptedLLM:
 
     @staticmethod
     def refuse() -> Reply:
-        return {"content": [], "stop_reason": "refusal", "stop_details": {"type": "refusal", "category": "cyber"}}
+        return {
+            "content": [],
+            "stop_reason": "refusal",
+            "stop_details": {"type": "refusal", "category": "cyber"},
+        }
 
-    async def complete(self, system: str | None, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]:
+    async def complete(
+        self, system: str | None, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+    ) -> dict[str, Any]:
         index = self.calls
         self.calls += 1
         if callable(self._replies):

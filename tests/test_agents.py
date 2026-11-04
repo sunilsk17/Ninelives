@@ -18,7 +18,9 @@ from .conftest import FakeClock
 say, call = ScriptedLLM.say, ScriptedLLM.call
 
 
-def shop(app: Ninelives, llm: ScriptedLLM, name: str = "support", **kw) -> tuple[Agent, Counter[str], list[str]]:
+def shop(
+    app: Ninelives, llm: ScriptedLLM, name: str = "support", **kw
+) -> tuple[Agent, Counter[str], list[str]]:
     effects: Counter[str] = Counter()
     keys: list[str] = []
 
@@ -145,9 +147,19 @@ async def test_refusal_budget_and_turn_limits(store: Store) -> None:
     r1 = await refused.start("something disallowed")
 
     loop_app = Ninelives(store)
-    looping, _, _ = shop(loop_app, ScriptedLLM(lambda m: call("lookup_order", {"order_id": f"X{len(m)}"})), name="looper", max_turns=3)
+    looping, _, _ = shop(
+        loop_app,
+        ScriptedLLM(lambda m: call("lookup_order", {"order_id": f"X{len(m)}"})),
+        name="looper",
+        max_turns=3,
+    )
     budget_app = Ninelives(store)
-    capped, _, _ = shop(budget_app, ScriptedLLM(lambda m: call("lookup_order", {"order_id": "Y"})), name="capped", max_total_tokens=1)
+    capped, _, _ = shop(
+        budget_app,
+        ScriptedLLM(lambda m: call("lookup_order", {"order_id": "Y"})),
+        name="capped",
+        max_total_tokens=1,
+    )
 
     r2 = await looping.start("loop forever")
     r3 = await capped.start("expensive")
@@ -172,7 +184,9 @@ async def test_unknown_tool_bad_arguments_and_failures_go_back_to_the_model(stor
     def replies(messages: list[dict]) -> dict:
         n = len(messages)
         if n == 1:
-            return ScriptedLLM.calls_(call("nope", {}, id="a"), call("explode", {"y": 1}, id="b"), call("explode", {"x": 1}, id="c"))
+            return ScriptedLLM.calls_(
+                call("nope", {}, id="a"), call("explode", {"y": 1}, id="b"), call("explode", {"x": 1}, id="c")
+            )
         fed_back.extend(r["content"] for r in messages[-1]["content"])
         return say("done")
 
@@ -191,7 +205,13 @@ class Color(enum.Enum):
 
 def test_tool_schemas_from_type_hints() -> None:
     @tool(description="Paint things")
-    def paint(item: str, color: Color, coats: int = 2, tags: list[str] | None = None, mode: Literal["fast", "slow"] = "fast") -> None:
+    def paint(
+        item: str,
+        color: Color,
+        coats: int = 2,
+        tags: list[str] | None = None,
+        mode: Literal["fast", "slow"] = "fast",
+    ) -> None:
         """Ignored because description is given.
 
         item: what to paint
@@ -265,7 +285,9 @@ async def test_anthropic_llm_request_shape_and_round_trip() -> None:
     ]
     fake = FakeMessages(sdk_message(blocks, "tool_use"))
     llm = AnthropicLLM(client=FakeClient(fake))
-    tools = [{"name": "lookup_order", "description": "d", "input_schema": {"type": "object", "properties": {}}}]
+    tools = [
+        {"name": "lookup_order", "description": "d", "input_schema": {"type": "object", "properties": {}}}
+    ]
     out = await llm.complete("sys", [{"role": "user", "content": "hi"}], tools)
     sent = fake.kwargs
     assert sent["model"] == "claude-opus-5-5" and sent["system"] == "sys" and sent["tools"] == tools
@@ -273,7 +295,11 @@ async def test_anthropic_llm_request_shape_and_round_trip() -> None:
     assert sent["fallbacks"] == "default" and sent["betas"] == ["server-side-fallback-2026-07-01"]
     assert "thinking" not in sent and "tool_choice" not in sent
     assert out["stop_reason"] == "tool_use" and out["usage"]["input_tokens"] == 120
-    assert out["content"][0] == {"type": "thinking", "thinking": "", "signature": "sig-abc"}  # passed back unchanged
+    assert out["content"][0] == {
+        "type": "thinking",
+        "thinking": "",
+        "signature": "sig-abc",
+    }  # passed back unchanged
     assert out["content"][2]["input"] == {"order_id": "A1"}
 
 

@@ -150,7 +150,9 @@ class SQLiteStore(Store):
 
     # ------------------------------------------------------------------ plumbing
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None, timeout=self.busy_timeout_ms / 1000)
+        conn = sqlite3.connect(
+            self.path, check_same_thread=False, isolation_level=None, timeout=self.busy_timeout_ms / 1000
+        )
         conn.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")
         if self.path != ":memory:":
             conn.execute("PRAGMA journal_mode = WAL")
@@ -183,7 +185,9 @@ class SQLiteStore(Store):
         if row is None or row[0] != token:
             raise LeaseLost(wf_id)
 
-    def _fenced(self, wf_id: str, token: str, body: Callable[[sqlite3.Connection], T]) -> Callable[[sqlite3.Connection], T]:
+    def _fenced(
+        self, wf_id: str, token: str, body: Callable[[sqlite3.Connection], T]
+    ) -> Callable[[sqlite3.Connection], T]:
         def run(conn: sqlite3.Connection) -> T:
             def tx(c: sqlite3.Connection) -> T:
                 self._check_lease(c, wf_id, token)
@@ -234,7 +238,9 @@ class SQLiteStore(Store):
         return await self._run(lambda c: self._tx(c, body))
 
     async def get_workflow(self, wf_id: str) -> WorkflowRecord | None:
-        row = await self._run(lambda c: c.execute(f"SELECT {WF_COLS} FROM workflows WHERE id = ?", (wf_id,)).fetchone())
+        row = await self._run(
+            lambda c: c.execute(f"SELECT {WF_COLS} FROM workflows WHERE id = ?", (wf_id,)).fetchone()
+        )
         return _wf(row) if row else None
 
     async def list_workflows(
@@ -255,7 +261,9 @@ class SQLiteStore(Store):
         return [_wf(r) for r in rows]
 
     async def count_by_status(self) -> dict[str, int]:
-        rows = await self._run(lambda c: c.execute("SELECT status, COUNT(*) FROM workflows GROUP BY status").fetchall())
+        rows = await self._run(
+            lambda c: c.execute("SELECT status, COUNT(*) FROM workflows GROUP BY status").fetchall()
+        )
         return {r[0]: r[1] for r in rows}
 
     async def send_signal(self, wf_id: str, name: str, payload: Any, now: float) -> Signal:
@@ -271,7 +279,13 @@ class SQLiteStore(Store):
                 "UPDATE workflows SET wake_at = ?, updated_at = ? WHERE id = ? AND status = ?",
                 (now, now, wf_id, str(Status.WAITING)),
             )
-            return Signal(id=int(cur.lastrowid or 0), workflow_id=wf_id, name=name, payload=serde.loads(serde.dumps(payload)), created_at=now)
+            return Signal(
+                id=int(cur.lastrowid or 0),
+                workflow_id=wf_id,
+                name=name,
+                payload=serde.loads(serde.dumps(payload)),
+                created_at=now,
+            )
 
         return await self._run(lambda c: self._tx(c, body))
 
@@ -284,10 +298,17 @@ class SQLiteStore(Store):
             if status in (Status.PENDING, Status.WAITING):
                 c.execute(
                     "UPDATE workflows SET status = ?, cancel_requested = 1, error = ?, wake_at = NULL, updated_at = ? WHERE id = ?",
-                    (str(Status.CANCELLED), serde.dumps({"type": "Cancelled", "message": "cancelled by request"}), now, wf_id),
+                    (
+                        str(Status.CANCELLED),
+                        serde.dumps({"type": "Cancelled", "message": "cancelled by request"}),
+                        now,
+                        wf_id,
+                    ),
                 )
             elif status == Status.RUNNING:
-                c.execute("UPDATE workflows SET cancel_requested = 1, updated_at = ? WHERE id = ?", (now, wf_id))
+                c.execute(
+                    "UPDATE workflows SET cancel_requested = 1, updated_at = ? WHERE id = ?", (now, wf_id)
+                )
             return _wf(c.execute(f"SELECT {WF_COLS} FROM workflows WHERE id = ?", (wf_id,)).fetchone())
 
         return await self._run(lambda c: self._tx(c, body))
@@ -322,7 +343,9 @@ class SQLiteStore(Store):
         return [Signal(r[0], r[1], r[2], serde.loads(r[3]), r[4], r[5]) for r in rows]
 
     # ------------------------------------------------------------------ worker side
-    async def claim(self, worker_id: str, now: float, ttl: float, names: Sequence[str], limit: int) -> list[WorkflowRecord]:
+    async def claim(
+        self, worker_id: str, now: float, ttl: float, names: Sequence[str], limit: int
+    ) -> list[WorkflowRecord]:
         if not names or limit <= 0:
             return []
         marks = ",".join("?" for _ in names)
@@ -342,7 +365,9 @@ class SQLiteStore(Store):
                     "runs = runs + 1, recoveries = recoveries + ?, updated_at = ? WHERE id = ?",
                     (uuid.uuid4().hex, worker_id, now + ttl, 1 if prev == "RUNNING" else 0, now, wf_id),
                 )
-                out.append(_wf(c.execute(f"SELECT {WF_COLS} FROM workflows WHERE id = ?", (wf_id,)).fetchone()))
+                out.append(
+                    _wf(c.execute(f"SELECT {WF_COLS} FROM workflows WHERE id = ?", (wf_id,)).fetchone())
+                )
             return out
 
         return await self._run(lambda c: self._tx(c, body))
@@ -361,11 +386,16 @@ class SQLiteStore(Store):
         return await self._run(lambda c: self._tx(c, body))
 
     async def write_entry(self, token: str, entry: JournalEntry) -> None:
-        await self._run(self._fenced(entry.workflow_id, token, lambda c: c.execute(INSERT_ENTRY, _entry_params(entry))))
+        await self._run(
+            self._fenced(entry.workflow_id, token, lambda c: c.execute(INSERT_ENTRY, _entry_params(entry)))
+        )
 
     async def start_attempt(self, token: str, wf_id: str, seq: int, worker: str, now: float) -> int:
         def body(c: sqlite3.Connection) -> int:
-            row = c.execute("SELECT COALESCE(MAX(attempt), 0) FROM attempts WHERE workflow_id = ? AND seq = ?", (wf_id, seq)).fetchone()
+            row = c.execute(
+                "SELECT COALESCE(MAX(attempt), 0) FROM attempts WHERE workflow_id = ? AND seq = ?",
+                (wf_id, seq),
+            ).fetchone()
             n = int(row[0]) + 1
             c.execute(
                 "INSERT INTO attempts (workflow_id, seq, attempt, worker, started_at) VALUES (?,?,?,?,?)",
@@ -375,7 +405,9 @@ class SQLiteStore(Store):
 
         return await self._run(self._fenced(wf_id, token, body))
 
-    async def finish_attempt(self, token: str, wf_id: str, seq: int, attempt: int, now: float, error: str | None) -> None:
+    async def finish_attempt(
+        self, token: str, wf_id: str, seq: int, attempt: int, now: float, error: str | None
+    ) -> None:
         await self._run(
             self._fenced(
                 wf_id,
@@ -398,13 +430,17 @@ class SQLiteStore(Store):
                 return None
             c.execute("UPDATE signals SET consumed_seq = ? WHERE id = ?", (entry.seq, row[0]))
             payload = serde.loads(row[3])
-            done = JournalEntry(**{**entry.__dict__, "status": EntryStatus.COMPLETED, "output": {"payload": payload}})
+            done = JournalEntry(
+                **{**entry.__dict__, "status": EntryStatus.COMPLETED, "output": {"payload": payload}}
+            )
             c.execute(INSERT_ENTRY, _entry_params(done))
             return Signal(row[0], row[1], row[2], payload, row[4], entry.seq)
 
         return await self._run(self._fenced(entry.workflow_id, token, body))
 
-    async def finish(self, token: str, wf_id: str, status: Status, output: Any, error: dict[str, Any] | None, now: float) -> None:
+    async def finish(
+        self, token: str, wf_id: str, status: Status, output: Any, error: dict[str, Any] | None, now: float
+    ) -> None:
         await self._run(
             self._fenced(
                 wf_id,
@@ -423,7 +459,9 @@ class SQLiteStore(Store):
             )
         )
 
-    async def suspend(self, token: str, wf_id: str, wake_at: float | None, waiting_for: Sequence[str], now: float) -> Status:
+    async def suspend(
+        self, token: str, wf_id: str, wake_at: float | None, waiting_for: Sequence[str], now: float
+    ) -> Status:
         def body(c: sqlite3.Connection) -> Status:
             cancel = c.execute("SELECT cancel_requested FROM workflows WHERE id = ?", (wf_id,)).fetchone()[0]
             if cancel:

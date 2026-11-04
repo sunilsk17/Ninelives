@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import logging
 import os
 import socket
@@ -93,8 +94,11 @@ class Worker:
             self._tokens[rec.id] = rec.lease_token
             task = asyncio.create_task(self._execute(rec), name=f"ninelives:{rec.id}")
             self._running[rec.id] = task
-            task.add_done_callback(lambda _t, wf_id=rec.id: self._running.pop(wf_id, None))
+            task.add_done_callback(functools.partial(self._forget, rec.id))
         return len(records)
+
+    def _forget(self, wf_id: str, _task: asyncio.Task[None]) -> None:
+        self._running.pop(wf_id, None)
 
     async def _shutdown(self) -> None:
         if not self._running:
@@ -148,21 +152,27 @@ class Worker:
                 output = await spec.fn(ctx, *args, **kwargs)
             finally:
                 _current_ctx.reset(ctx_token)
-            await store.finish(token, rec.id, Status.SUCCEEDED, serde.loads(serde.dumps(output)), None, self.app.clock())
+            await store.finish(
+                token, rec.id, Status.SUCCEEDED, serde.loads(serde.dumps(output)), None, self.app.clock()
+            )
             self.completed += 1
         except _Suspend as s:
             await self._safe(store.suspend(token, rec.id, s.wake_at, s.waiting_for, self.app.clock()))
         except (_Abandon, LeaseLost):
             log.info("abandoning %s: another worker owns it now", rec.id)
         except Cancelled as exc:
-            await self._safe(store.finish(token, rec.id, Status.CANCELLED, None, serde.error_dict(exc), self.app.clock()))
+            await self._safe(
+                store.finish(token, rec.id, Status.CANCELLED, None, serde.error_dict(exc), self.app.clock())
+            )
         except asyncio.CancelledError:
             if rec.id in self._lost:
                 return  # lease lost mid-run; the new owner carries on
             raise  # worker shutdown: the lease is released in _shutdown
         except Exception as exc:
             log.exception("workflow %s failed", rec.id)
-            await self._safe(store.finish(token, rec.id, Status.FAILED, None, serde.error_dict(exc), self.app.clock()))
+            await self._safe(
+                store.finish(token, rec.id, Status.FAILED, None, serde.error_dict(exc), self.app.clock())
+            )
         finally:
             if hb is not None:
                 hb.cancel()

@@ -95,7 +95,14 @@ def tool(
     """
 
     def build(f: Callable[..., Any]) -> Tool:
-        return make_tool(f, name=name, description=description, requires_approval=requires_approval, retry=retry, timeout=timeout)
+        return make_tool(
+            f,
+            name=name,
+            description=description,
+            requires_approval=requires_approval,
+            retry=retry,
+            timeout=timeout,
+        )
 
     return build(fn) if fn is not None else build
 

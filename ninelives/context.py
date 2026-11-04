@@ -155,11 +155,20 @@ class WorkflowContext:
         policy: RetryPolicy = spec.retry
         started = self._clock()
         while True:
-            attempt = await self._guard(self._store.start_attempt(self._token, self.workflow_id, seq, self._worker_id, self._clock()))
+            attempt = await self._guard(
+                self._store.start_attempt(self._token, self.workflow_id, seq, self._worker_id, self._clock())
+            )
             if attempt > policy.max_attempts:
                 # Earlier attempts were lost to crashes; the budget is spent.
-                error = {"type": "RetriesExhausted", "message": f"{attempt - 1} attempts used (max {policy.max_attempts})"}
-                await self._guard(self._store.finish_attempt(self._token, self.workflow_id, seq, attempt, self._clock(), "budget exhausted"))
+                error = {
+                    "type": "RetriesExhausted",
+                    "message": f"{attempt - 1} attempts used (max {policy.max_attempts})",
+                }
+                await self._guard(
+                    self._store.finish_attempt(
+                        self._token, self.workflow_id, seq, attempt, self._clock(), "budget exhausted"
+                    )
+                )
                 await self._write(self._failed_entry(seq, spec.name, error, attempt - 1, started))
                 raise StepFailed(spec.name, error)
             token = _current_step.set(StepInfo(self.workflow_id, seq, spec.name, attempt))
@@ -173,22 +182,36 @@ class WorkflowContext:
             finally:
                 _current_step.reset(token)
             if failure is not None:
-                exc = failure
                 await self._guard(
-                    self._store.finish_attempt(self._token, self.workflow_id, seq, attempt, self._clock(), f"{type(exc).__name__}: {exc}")
+                    self._store.finish_attempt(
+                        self._token,
+                        self.workflow_id,
+                        seq,
+                        attempt,
+                        self._clock(),
+                        f"{type(failure).__name__}: {failure}",
+                    )
                 )
-                permanent = isinstance(exc, PermanentError) or isinstance(exc, policy.non_retryable)
+                permanent = isinstance(failure, (PermanentError, *policy.non_retryable))
                 if permanent or attempt >= policy.max_attempts:
-                    error = serde.error_dict(exc)
+                    error = serde.error_dict(failure)
                     await self._write(self._failed_entry(seq, spec.name, error, attempt, started))
-                    raise StepFailed(spec.name, error) from exc
+                    raise StepFailed(spec.name, error) from failure
                 delay = policy.delay(attempt)
-                log.info("step %s of %s failed (attempt %d), retrying in %.2fs", spec.name, self.workflow_id, attempt, delay)
+                log.info(
+                    "step %s of %s failed (attempt %d), retrying in %.2fs",
+                    spec.name,
+                    self.workflow_id,
+                    attempt,
+                    delay,
+                )
                 await asyncio.sleep(delay)
                 self._check_cancel()
                 continue
             value = serde.loads(serde.dumps(result))  # the same value replay will return
-            await self._guard(self._store.finish_attempt(self._token, self.workflow_id, seq, attempt, self._clock(), None))
+            await self._guard(
+                self._store.finish_attempt(self._token, self.workflow_id, seq, attempt, self._clock(), None)
+            )
             await self._write(
                 JournalEntry(
                     workflow_id=self.workflow_id,
@@ -214,7 +237,9 @@ class WorkflowContext:
             return await asyncio.wait_for(call, spec.timeout)
         return await call
 
-    def _failed_entry(self, seq: int, name: str, error: dict[str, Any], attempts: int, started: float) -> JournalEntry:
+    def _failed_entry(
+        self, seq: int, name: str, error: dict[str, Any], attempts: int, started: float
+    ) -> JournalEntry:
         return JournalEntry(
             workflow_id=self.workflow_id,
             seq=seq,
@@ -280,12 +305,18 @@ class WorkflowContext:
             if out.get("timeout"):
                 raise SignalTimeout(f"no {name!r} signal within the timeout")
             return out.get("payload")
-        signal = await self._guard(self._store.consume_signal(self._token, replace(entry, completed_at=now), name))
+        signal = await self._guard(
+            self._store.consume_signal(self._token, replace(entry, completed_at=now), name)
+        )
         if signal is not None:
-            self._journal[seq] = replace(entry, status=EntryStatus.COMPLETED, output={"payload": signal.payload}, completed_at=now)
+            self._journal[seq] = replace(
+                entry, status=EntryStatus.COMPLETED, output={"payload": signal.payload}, completed_at=now
+            )
             return signal.payload
         if entry.wake_at is not None and now >= entry.wake_at:
-            await self._write(replace(entry, status=EntryStatus.COMPLETED, output={"timeout": True}, completed_at=now))
+            await self._write(
+                replace(entry, status=EntryStatus.COMPLETED, output={"timeout": True}, completed_at=now)
+            )
             raise SignalTimeout(f"no {name!r} signal within the timeout")
         raise _Suspend(entry.wake_at, (name,))
 

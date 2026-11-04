@@ -75,7 +75,9 @@ class Ninelives:
     ...     return receipt
     """
 
-    def __init__(self, store: Store | str = "sqlite:///ninelives.db", *, clock: Callable[[], float] = time.time):
+    def __init__(
+        self, store: Store | str = "sqlite:///ninelives.db", *, clock: Callable[[], float] = time.time
+    ):
         self.store: Store = open_store(store) if isinstance(store, str) else store
         self.clock = clock
         self.workflows: dict[str, WorkflowSpec] = {}
@@ -87,7 +89,9 @@ class Ninelives:
     def workflow(self, fn: Callable[..., Any] | None = None, *, name: str | None = None) -> Any:
         def register(f: Callable[..., Any]) -> WorkflowFunction[Any, Any]:
             if not inspect.iscoroutinefunction(f):
-                raise TypeError(f"workflow {f.__name__} must be an async function taking ctx as its first argument")
+                raise TypeError(
+                    f"workflow {f.__name__} must be an async function taking ctx as its first argument"
+                )
             wf_name = name or f.__name__
             if wf_name in self.workflows and self.workflows[wf_name].fn is not f:
                 raise ValueError(f"a workflow named {wf_name!r} is already registered")
@@ -154,7 +158,13 @@ class Ninelives:
         return Worker(self, **options)
 
     # ------------------------------------------------------------------ client operations
-    async def start(self, workflow: str | WorkflowFunction[Any, Any] | Callable[..., Any], *args: Any, id: str | None = None, **kwargs: Any) -> str:
+    async def start(
+        self,
+        workflow: str | WorkflowFunction[Any, Any] | Callable[..., Any],
+        *args: Any,
+        id: str | None = None,
+        **kwargs: Any,
+    ) -> str:
         """Start a workflow and return its id. With an explicit ``id`` the call is idempotent."""
         await self.init()
         name = self._workflow_name(workflow)
@@ -199,10 +209,14 @@ class Ninelives:
         entries = [e for e in await self.store.get_journal(wf_id) if e.seq < from_seq]
         unfinished = [e.seq for e in entries if e.status == EntryStatus.PENDING]
         if unfinished:
-            raise ValueError(f"cannot fork from step {from_seq}: step(s) {unfinished} before it never finished")
+            raise ValueError(
+                f"cannot fork from step {from_seq}: step(s) {unfinished} before it never finished"
+            )
         new_id = f"{rec.name}-fork-{uuid.uuid4().hex[:10]}"
         copied = [replace(e, workflow_id=new_id) for e in entries]
-        await self.store.create_workflow(new_id, rec.name, rec.input, self.clock(), copied, forked_from=wf_id, fork_seq=from_seq)
+        await self.store.create_workflow(
+            new_id, rec.name, rec.input, self.clock(), copied, forked_from=wf_id, fork_seq=from_seq
+        )
         return new_id
 
     async def describe(self, wf_id: str) -> dict[str, Any]:

@@ -171,6 +171,8 @@ async def test_finish_release_list_and_counts(store: Store) -> None:
 
 
 async def test_create_with_copied_journal(store: Store) -> None:
-    rec, _ = await store.create_workflow("f", "wf", {}, T0, [entry("f", 1, output=5)], forked_from="orig", fork_seq=2)
+    rec, _ = await store.create_workflow(
+        "f", "wf", {}, T0, [entry("f", 1, output=5)], forked_from="orig", fork_seq=2
+    )
     assert rec.forked_from == "orig" and rec.fork_seq == 2
     assert [e.output for e in await store.get_journal("f")] == [5]

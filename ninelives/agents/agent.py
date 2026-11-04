@@ -64,7 +64,8 @@ class Agent:
         self.workflow_name = f"agent:{name}"
         self._llm_step = app.step(name=f"agent:{name}:llm", retry=llm_retry)(self._call_llm)
         self._tool_steps = {
-            t.name: app.step(name=f"tool:{t.name}", retry=t.retry, timeout=t.timeout)(t.fn) for t in self.tools.values()
+            t.name: app.step(name=f"tool:{t.name}", retry=t.retry, timeout=t.timeout)(t.fn)
+            for t in self.tools.values()
         }
         app.workflow(name=self.workflow_name)(self._run)
 
@@ -75,7 +76,9 @@ class Agent:
     async def start(self, prompt: str, *, id: str | None = None) -> str:
         return await self.app.start(self.workflow_name, prompt, id=id)
 
-    async def approve(self, run_id: str, call_id: str, approved: bool = True, note: str | None = None) -> None:
+    async def approve(
+        self, run_id: str, call_id: str, approved: bool = True, note: str | None = None
+    ) -> None:
         await self.app.signal(run_id, approval_signal(call_id), {"approved": approved, "note": note})
 
     async def result(self, run_id: str, timeout: float | None = None) -> dict[str, Any]:
@@ -90,10 +93,17 @@ class Agent:
         actions: list[dict[str, Any]] = []
 
         def finish(status: str, answer: str | None = None, **extra: Any) -> dict[str, Any]:
-            return {"status": status, "answer": answer, "turns": turn + 1, "usage": usage, "actions": actions, **extra}
+            return {
+                "status": status,
+                "answer": answer,
+                "turns": turn + 1,
+                "usage": usage,
+                "actions": actions,
+                **extra,
+            }
 
         turn = 0
-        for turn in range(self.max_turns):
+        for turn in range(self.max_turns):  # noqa: B007 - read by finish()
             response = await ctx.step(self._llm_step, messages)
             usage["input_tokens"] += response.get("usage", {}).get("input_tokens", 0)
             usage["output_tokens"] += response.get("usage", {}).get("output_tokens", 0)
@@ -116,27 +126,39 @@ class Agent:
             # All results of one turn go back in a single user message.
             messages.append({"role": "user", "content": results})
 
-            if self.max_total_tokens is not None and usage["input_tokens"] + usage["output_tokens"] >= self.max_total_tokens:
+            if (
+                self.max_total_tokens is not None
+                and usage["input_tokens"] + usage["output_tokens"] >= self.max_total_tokens
+            ):
                 return finish("budget_exhausted", text_of(content))
         return finish("max_turns", text_of(messages[-2]["content"]) if len(messages) >= 2 else None)
 
-    async def _run_tool(self, ctx: WorkflowContext, call: dict[str, Any], actions: list[dict[str, Any]]) -> dict[str, Any]:
+    async def _run_tool(
+        self, ctx: WorkflowContext, call: dict[str, Any], actions: list[dict[str, Any]]
+    ) -> dict[str, Any]:
         tool = self.tools.get(call["name"])
         record: dict[str, Any] = {"tool": call["name"], "call_id": call["id"], "input": call["input"]}
         actions.append(record)
         if tool is None:
             record["outcome"] = "unknown_tool"
-            return _result(call["id"], f"Unknown tool {call['name']!r}. Available: {', '.join(self.tools)}", error=True)
+            return _result(
+                call["id"], f"Unknown tool {call['name']!r}. Available: {', '.join(self.tools)}", error=True
+            )
         if tool.requires_approval:
             try:
-                decision = await ctx.wait_for_signal(approval_signal(call["id"]), timeout=self.approval_timeout) or {}
+                decision = (
+                    await ctx.wait_for_signal(approval_signal(call["id"]), timeout=self.approval_timeout)
+                    or {}
+                )
             except SignalTimeout:
                 decision = {"approved": False, "note": "no decision before the approval timeout"}
             record["approval"] = decision
             if not decision.get("approved"):
                 record["outcome"] = "denied"
                 note = decision.get("note") or "no reason given"
-                return _result(call["id"], f"A human reviewer denied this action ({note}). Do not retry it.", error=True)
+                return _result(
+                    call["id"], f"A human reviewer denied this action ({note}). Do not retry it.", error=True
+                )
         try:
             # Check the model's arguments against the signature before running anything.
             inspect.signature(tool.fn).bind(**call["input"])

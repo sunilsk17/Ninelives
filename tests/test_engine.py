@@ -59,7 +59,9 @@ async def test_steps_run_and_outputs_round_trip(store: Store) -> None:
     assert sync_step(5) == (5, 10)  # outside a workflow it is the plain function
 
 
-async def test_crash_mid_workflow_resumes_without_repeating_finished_steps(store: Store, clock: FakeClock) -> None:
+async def test_crash_mid_workflow_resumes_without_repeating_finished_steps(
+    store: Store, clock: FakeClock
+) -> None:
     app = make_app(store, clock)
     calls: Counter[str] = Counter()
     keys: list[str] = []

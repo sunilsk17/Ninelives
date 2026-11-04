@@ -79,7 +79,9 @@ WF_COLS = (
     "id, name, status, input, output, error, created_at, updated_at, wake_at, lease_token, lease_owner, "
     "lease_expires_at, runs, recoveries, cancel_requested, forked_from, fork_seq"
 )
-ENTRY_COLS = "workflow_id, seq, kind, name, status, output, error, wake_at, attempts, started_at, completed_at"
+ENTRY_COLS = (
+    "workflow_id, seq, kind, name, status, output, error, wake_at, attempts, started_at, completed_at"
+)
 
 UPSERT_ENTRY = (
     f"INSERT INTO journal ({ENTRY_COLS}) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) "
@@ -145,7 +147,9 @@ def _entry_args(e: JournalEntry) -> tuple[Any, ...]:
 
 async def _init_conn(conn: Any) -> None:
     # Keep JSONB as text both ways; serde handles (de)serialization.
-    await conn.set_type_codec("jsonb", encoder=lambda v: v, decoder=lambda v: v, schema="pg_catalog", format="text")
+    await conn.set_type_codec(
+        "jsonb", encoder=lambda v: v, decoder=lambda v: v, schema="pg_catalog", format="text"
+    )
 
 
 class PostgresStore(Store):
@@ -161,7 +165,9 @@ class PostgresStore(Store):
 
     async def _get_pool(self) -> Any:
         if self._pool is None:
-            self._pool = await asyncpg.create_pool(self.dsn, min_size=self.min_size, max_size=self.max_size, init=_init_conn)
+            self._pool = await asyncpg.create_pool(
+                self.dsn, min_size=self.min_size, max_size=self.max_size, init=_init_conn
+            )
         return self._pool
 
     async def _fenced(self, wf_id: str, token: str, body: Callable[[Any], Awaitable[T]]) -> T:
@@ -175,11 +181,10 @@ class PostgresStore(Store):
     # ------------------------------------------------------------------ lifecycle
     async def init(self) -> None:
         pool = await self._get_pool()
-        async with pool.acquire() as conn:
-            # Serialise concurrent schema creation from several processes.
-            async with conn.transaction():
-                await conn.execute("SELECT pg_advisory_xact_lock(727274)")
-                await conn.execute(SCHEMA)
+        # Serialise concurrent schema creation from several processes.
+        async with pool.acquire() as conn, conn.transaction():
+            await conn.execute("SELECT pg_advisory_xact_lock(727274)")
+            await conn.execute(SCHEMA)
 
     async def close(self) -> None:
         if self._pool is not None:
@@ -254,9 +259,17 @@ class PostgresStore(Store):
                 now,
             )
             await conn.execute(
-                "UPDATE workflows SET wake_at = $1, updated_at = $1 WHERE id = $2 AND status = 'WAITING'", now, wf_id
+                "UPDATE workflows SET wake_at = $1, updated_at = $1 WHERE id = $2 AND status = 'WAITING'",
+                now,
+                wf_id,
             )
-            return Signal(id=sid, workflow_id=wf_id, name=name, payload=serde.loads(serde.dumps(payload)), created_at=now)
+            return Signal(
+                id=sid,
+                workflow_id=wf_id,
+                name=name,
+                payload=serde.loads(serde.dumps(payload)),
+                created_at=now,
+            )
 
     async def request_cancel(self, wf_id: str, now: float) -> WorkflowRecord:
         pool = await self._get_pool()
@@ -273,12 +286,16 @@ class PostgresStore(Store):
                     wf_id,
                 )
             elif status == "RUNNING":
-                await conn.execute("UPDATE workflows SET cancel_requested = TRUE, updated_at = $1 WHERE id = $2", now, wf_id)
+                await conn.execute(
+                    "UPDATE workflows SET cancel_requested = TRUE, updated_at = $1 WHERE id = $2", now, wf_id
+                )
             return _wf(await conn.fetchrow(f"SELECT {WF_COLS} FROM workflows WHERE id = $1", wf_id))
 
     async def get_journal(self, wf_id: str) -> list[JournalEntry]:
         pool = await self._get_pool()
-        rows = await pool.fetch(f"SELECT {ENTRY_COLS} FROM journal WHERE workflow_id = $1 ORDER BY seq", wf_id)
+        rows = await pool.fetch(
+            f"SELECT {ENTRY_COLS} FROM journal WHERE workflow_id = $1 ORDER BY seq", wf_id
+        )
         return [_entry(r) for r in rows]
 
     async def get_attempts(self, wf_id: str) -> list[Attempt]:
@@ -296,10 +313,22 @@ class PostgresStore(Store):
             "SELECT id, workflow_id, name, payload, created_at, consumed_seq FROM signals WHERE workflow_id = $1 ORDER BY id",
             wf_id,
         )
-        return [Signal(r["id"], r["workflow_id"], r["name"], serde.loads(r["payload"]), r["created_at"], r["consumed_seq"]) for r in rows]
+        return [
+            Signal(
+                r["id"],
+                r["workflow_id"],
+                r["name"],
+                serde.loads(r["payload"]),
+                r["created_at"],
+                r["consumed_seq"],
+            )
+            for r in rows
+        ]
 
     # ------------------------------------------------------------------ worker side
-    async def claim(self, worker_id: str, now: float, ttl: float, names: Sequence[str], limit: int) -> list[WorkflowRecord]:
+    async def claim(
+        self, worker_id: str, now: float, ttl: float, names: Sequence[str], limit: int
+    ) -> list[WorkflowRecord]:
         if not names or limit <= 0:
             return []
         pool = await self._get_pool()
@@ -352,7 +381,9 @@ class PostgresStore(Store):
     async def start_attempt(self, token: str, wf_id: str, seq: int, worker: str, now: float) -> int:
         async def body(conn: Any) -> int:
             n = await conn.fetchval(
-                "SELECT COALESCE(MAX(attempt), 0) + 1 FROM attempts WHERE workflow_id = $1 AND seq = $2", wf_id, seq
+                "SELECT COALESCE(MAX(attempt), 0) + 1 FROM attempts WHERE workflow_id = $1 AND seq = $2",
+                wf_id,
+                seq,
             )
             await conn.execute(
                 "INSERT INTO attempts (workflow_id, seq, attempt, worker, started_at) VALUES ($1,$2,$3,$4,$5)",
@@ -366,7 +397,9 @@ class PostgresStore(Store):
 
         return await self._fenced(wf_id, token, body)
 
-    async def finish_attempt(self, token: str, wf_id: str, seq: int, attempt: int, now: float, error: str | None) -> None:
+    async def finish_attempt(
+        self, token: str, wf_id: str, seq: int, attempt: int, now: float, error: str | None
+    ) -> None:
         async def body(conn: Any) -> None:
             await conn.execute(
                 "UPDATE attempts SET finished_at = $1, error = $2 WHERE workflow_id = $3 AND seq = $4 AND attempt = $5",
@@ -391,13 +424,17 @@ class PostgresStore(Store):
                 return None
             await conn.execute("UPDATE signals SET consumed_seq = $1 WHERE id = $2", entry.seq, row["id"])
             payload = serde.loads(row["payload"])
-            done = JournalEntry(**{**entry.__dict__, "status": EntryStatus.COMPLETED, "output": {"payload": payload}})
+            done = JournalEntry(
+                **{**entry.__dict__, "status": EntryStatus.COMPLETED, "output": {"payload": payload}}
+            )
             await conn.execute(UPSERT_ENTRY, *_entry_args(done))
             return Signal(row["id"], row["workflow_id"], row["name"], payload, row["created_at"], entry.seq)
 
         return await self._fenced(entry.workflow_id, token, body)
 
-    async def finish(self, token: str, wf_id: str, status: Status, output: Any, error: dict[str, Any] | None, now: float) -> None:
+    async def finish(
+        self, token: str, wf_id: str, status: Status, output: Any, error: dict[str, Any] | None, now: float
+    ) -> None:
         async def body(conn: Any) -> None:
             await conn.execute(
                 "UPDATE workflows SET status = $1, output = $2, error = $3, wake_at = NULL, lease_token = NULL, "
@@ -411,7 +448,9 @@ class PostgresStore(Store):
 
         await self._fenced(wf_id, token, body)
 
-    async def suspend(self, token: str, wf_id: str, wake_at: float | None, waiting_for: Sequence[str], now: float) -> Status:
+    async def suspend(
+        self, token: str, wf_id: str, wake_at: float | None, waiting_for: Sequence[str], now: float
+    ) -> Status:
         async def body(conn: Any) -> Status:
             cancel = await conn.fetchval("SELECT cancel_requested FROM workflows WHERE id = $1", wf_id)
             if cancel:
@@ -445,4 +484,6 @@ class PostgresStore(Store):
 
     async def release(self, token: str, wf_id: str) -> None:
         pool = await self._get_pool()
-        await pool.execute("UPDATE workflows SET lease_expires_at = 0 WHERE id = $1 AND lease_token = $2", wf_id, token)
+        await pool.execute(
+            "UPDATE workflows SET lease_expires_at = 0 WHERE id = $1 AND lease_token = $2", wf_id, token
+        )
