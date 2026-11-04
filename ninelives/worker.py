@@ -45,9 +45,11 @@ class Worker:
         self.lease_ttl = lease_ttl
         self.worker_id = worker_id or f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:6]}"
         self.shutdown_grace = shutdown_grace
+        #: The current execution of each workflow this worker holds, and its lease token.
         self._running: dict[str, asyncio.Task[None]] = {}
         self._tokens: dict[str, str] = {}
-        self._lost: set[str] = set()
+        #: Executions whose lease is gone; they are being cancelled and must not record anything.
+        self._lost: set[asyncio.Task[Any]] = set()
         self._stopping = asyncio.Event()
         self.completed = 0
 
@@ -91,14 +93,24 @@ class Worker:
         )
         for rec in records:
             assert rec.lease_token is not None
+            stale = self._running.get(rec.id)
+            if stale is not None:
+                # This worker's own lease lapsed (the process was paused or starved) and it just
+                # claimed the run again. The old execution's token is dead: stop it, start afresh.
+                log.warning(
+                    "worker %s re-claimed %s after its lease lapsed; restarting it", self.worker_id, rec.id
+                )
+                self._lost.add(stale)
+                stale.cancel()
             self._tokens[rec.id] = rec.lease_token
             task = asyncio.create_task(self._execute(rec), name=f"ninelives:{rec.id}")
             self._running[rec.id] = task
             task.add_done_callback(functools.partial(self._forget, rec.id))
         return len(records)
 
-    def _forget(self, wf_id: str, _task: asyncio.Task[None]) -> None:
-        self._running.pop(wf_id, None)
+    def _forget(self, wf_id: str, task: asyncio.Task[None]) -> None:
+        if self._running.get(wf_id) is task:
+            del self._running[wf_id]
 
     async def _shutdown(self) -> None:
         if not self._running:
@@ -128,7 +140,7 @@ class Worker:
                 continue
             if not hb.alive:
                 log.warning("worker %s lost the lease on %s", self.worker_id, rec.id)
-                self._lost.add(rec.id)
+                self._lost.add(task)
                 task.cancel()
                 return
             if hb.cancel_requested:
@@ -165,7 +177,7 @@ class Worker:
                 store.finish(token, rec.id, Status.CANCELLED, None, serde.error_dict(exc), self.app.clock())
             )
         except asyncio.CancelledError:
-            if rec.id in self._lost:
+            if current in self._lost:
                 return  # lease lost mid-run; the new owner carries on
             raise  # worker shutdown: the lease is released in _shutdown
         except Exception as exc:
@@ -178,9 +190,12 @@ class Worker:
                 hb.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await hb
-            self._lost.discard(rec.id)
-            if not (current.cancelled() or current.cancelling()):
-                self._tokens.pop(rec.id, None)
+            lost = current in self._lost
+            self._lost.discard(current)
+            # On shutdown the token is kept so _shutdown can release the lease right away.
+            shutting_down = not lost and (current.cancelled() or current.cancelling() > 0)
+            if not shutting_down and self._tokens.get(rec.id) == token:
+                del self._tokens[rec.id]
 
     async def _safe(self, op: Any) -> None:
         try:

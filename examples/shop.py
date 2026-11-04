@@ -63,7 +63,11 @@ async def charge_card(order_id: str, amount_cents: int) -> dict[str, Any]:
         raise PermanentError("card declined: amount over limit")  # retrying will not help
     if random.random() < FLAKINESS:
         raise ConnectionError("payment provider timed out")  # retried with backoff
-    return {"charge_id": "ch_" + hashlib.sha1(key.encode()).hexdigest()[:10], "amount_cents": amount_cents, "idempotency_key": key}
+    return {
+        "charge_id": "ch_" + hashlib.sha1(key.encode()).hexdigest()[:10],
+        "amount_cents": amount_cents,
+        "idempotency_key": key,
+    }
 
 
 @app.step()
@@ -82,7 +86,9 @@ async def send_email(order_id: str, template: str) -> str:
 
 
 @app.workflow()
-async def checkout(ctx: WorkflowContext, order_id: str, amount_cents: int, items: list[str] | None = None) -> dict[str, Any]:
+async def checkout(
+    ctx: WorkflowContext, order_id: str, amount_cents: int, items: list[str] | None = None
+) -> dict[str, Any]:
     reservation = await reserve_inventory(order_id, items or ["sku-teapot"])
     try:
         payment = await charge_card(order_id, amount_cents)
@@ -94,7 +100,12 @@ async def checkout(ctx: WorkflowContext, order_id: str, amount_cents: int, items
     await send_email(order_id, "order_confirmed")
     await ctx.sleep(FOLLOW_UP_DELAY)
     await send_email(order_id, "how_was_it")
-    return {"order_id": order_id, "status": "shipped", "charge": payment["charge_id"], "tracking": shipment["tracking"]}
+    return {
+        "order_id": order_id,
+        "status": "shipped",
+        "charge": payment["charge_id"],
+        "tracking": shipment["tracking"],
+    }
 
 
 # --------------------------------------------------------------------------- human in the loop
@@ -138,7 +149,11 @@ def refund(order_id: str, amount_cents: int, reason: str) -> dict[str, Any]:
     amount_cents: how much to refund, in cents
     reason: a short reason shown to the reviewer
     """
-    return {"refund_id": f"rf-{order_id}", "amount_cents": amount_cents, "idempotency_key": step_info().idempotency_key}
+    return {
+        "refund_id": f"rf-{order_id}",
+        "amount_cents": amount_cents,
+        "idempotency_key": step_info().idempotency_key,
+    }
 
 
 def scripted_support(messages: list[dict[str, Any]]) -> dict[str, Any]:
@@ -152,7 +167,7 @@ def scripted_support(messages: list[dict[str, Any]]) -> dict[str, Any]:
             return say("Which order is this about? Please send the order id, like A-1001.")
         return call("lookup_order", {"order_id": match.group(1)}, text="Let me look that order up.")
     result = last["content"][0]
-    previous = [b for b in messages[-2]["content"] if b.get("type") == "tool_use"][0]
+    previous = next(b for b in messages[-2]["content"] if b.get("type") == "tool_use")
     if previous["name"] == "lookup_order":
         if result.get("is_error"):
             return say(f"I couldn't find that order: {result['content']}")
@@ -167,7 +182,9 @@ def scripted_support(messages: list[dict[str, Any]]) -> dict[str, Any]:
     if result.get("is_error"):
         return say(f"I wasn't able to refund this order. {result['content']}")
     refund_out = json.loads(result["content"])
-    return say(f"Done: refund {refund_out['refund_id']} for ${refund_out['amount_cents'] / 100:.2f} is on its way.")
+    return say(
+        f"Done: refund {refund_out['refund_id']} for ${refund_out['amount_cents'] / 100:.2f} is on its way."
+    )
 
 
 llm = AnthropicLLM(effort="medium") if os.environ.get("ANTHROPIC_API_KEY") else ScriptedLLM(scripted_support)

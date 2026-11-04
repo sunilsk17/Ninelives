@@ -637,3 +637,43 @@ async def test_graceful_shutdown_hands_work_over(store: Store) -> None:
     await task
     rec = await app.get(wid)
     assert rec.status == Status.RUNNING and rec.lease_expires_at == 0  # released for an immediate takeover
+
+
+async def test_worker_that_reclaims_its_own_lapsed_run_replaces_the_stale_execution(
+    store: Store, clock: FakeClock
+) -> None:
+    """A paused worker can wake up and claim a run it is still (stuck) executing. The stale
+    execution must be stopped and the bookkeeping must follow the new one."""
+    app = make_app(store, clock)
+    gate = asyncio.Event()
+    calls = Counter[str]()
+
+    @app.step()
+    async def slow() -> str:
+        calls["slow"] += 1
+        if calls["slow"] == 1:
+            await gate.wait()  # the first execution hangs, like a paused process
+        return "done"
+
+    @app.workflow()
+    async def wf(ctx) -> str:
+        return await slow()
+
+    wf_id = await app.start(wf)
+    # A long TTL keeps heartbeats out of the picture: only the claim itself can notice the problem.
+    worker = app.worker(lease_ttl=600.0)
+    assert await worker._claim_once() == 1
+    first = worker._running[wf_id]
+    while not calls["slow"]:
+        await asyncio.sleep(0.001)
+    clock.advance(1000)  # the lease lapses while the first execution is stuck
+    assert await worker._claim_once() == 1
+    second = worker._running[wf_id]
+    assert second is not first
+    assert await app.result(wf_id, timeout=5) == "done"
+    await asyncio.wait_for(asyncio.gather(first, second, return_exceptions=True), timeout=5)
+    assert first.done() and first.exception() is None  # it stopped cleanly instead of hanging
+    assert worker._running == {} and worker._tokens == {} and worker._lost == set()
+    assert calls["slow"] == 2
+    rec = await app.get(wf_id)
+    assert rec.runs == 2 and rec.recoveries == 1
