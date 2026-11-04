@@ -62,3 +62,14 @@ async def transfer(ctx, n: int) -> int:
         if i == STEPS // 2 and n % 3 == 0:
             await ctx.sleep(1.2)  # long enough to suspend, so timers are exercised under chaos too
     return total
+
+
+@app.workflow(concurrency=6)
+async def fanout(ctx, n: int) -> int:
+    """A parent that fans out to three children and adds up their results."""
+    ids = [await ctx.start_child(transfer, n * 10 + k) for k in range(3)]
+    await ctx.set_event("children", ids)
+    total = 0
+    for child_id in ids:
+        total += await ctx.wait_child(child_id)
+    return total

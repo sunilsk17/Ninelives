@@ -186,3 +186,54 @@ async def test_workers_killed_and_frozen_at_random(store_url: str, tmp_path: Pat
         f"{WORKFLOWS * STEPS} effects applied exactly once"
     )
     await app.close()
+
+
+async def test_child_workflows_survive_chaos(store_url: str, tmp_path: Path) -> None:
+    """Parents fan out to children (with a concurrency limit on parents) while workers die."""
+    ledger = str(tmp_path / "ledger.db")
+    env = {**os.environ, "CHAOS_STORE": store_url, "CHAOS_LEDGER": ledger, "CHAOS_STEPS": "3"}
+    sys.path.insert(0, str(HERE))
+    os.environ.update({"CHAOS_STORE": store_url, "CHAOS_LEDGER": ledger})
+    from chaos_app import setup_ledger
+
+    setup_ledger(ledger)
+    app = Ninelives(store_url)
+    await app.init()
+    parents = [await app.start("fanout", n, id=f"p-{n:02d}") for n in range(20)]
+    total_runs = 20 * 4
+    fleet = Fleet(env, tmp_path)
+    for _ in range(WORKERS):
+        fleet.spawn()
+    rng = random.Random(99)
+    deadline = time.monotonic() + 150
+    try:
+        while time.monotonic() < deadline:
+            counts = await app.store.count_by_status()
+            if counts.get("SUCCEEDED", 0) + counts.get("FAILED", 0) >= total_runs:
+                break
+            await asyncio.sleep(rng.uniform(0.15, 0.4))
+            if fleet.kills < 10:
+                await asyncio.to_thread(fleet.kill_one, rng)
+        else:
+            pytest.fail(f"runs did not finish: {await app.store.count_by_status()}")
+    finally:
+        fleet.stop()
+
+    recoveries = 0
+    for n, parent in enumerate(parents):
+        rec = await app.get(parent)
+        assert rec.status == Status.SUCCEEDED, (parent, rec.status, rec.error)
+        expected = sum(sum((n * 10 + k) * 100 + i for i in range(3)) for k in range(3))
+        assert rec.output == expected
+        kids = await app.children(parent)
+        assert sorted(k.id for k in kids) == [f"{parent}/{i}" for i in (1, 2, 3)]  # no duplicates
+        assert await app.get_event(parent, "children") == [f"{parent}/{i}" for i in (1, 2, 3)]
+        recoveries += rec.recoveries + sum(k.recoveries for k in kids)
+    with closing(sqlite3.connect(ledger)) as db, db:
+        effects = db.execute("SELECT COUNT(*), COUNT(DISTINCT key) FROM ledger").fetchone()
+    assert effects == (20 * 3 * 3, 20 * 3 * 3)  # every child step's effect exactly once
+    assert fleet.kills >= 5 and recoveries > 0
+    print(
+        f"\nchaos-children[{store_url.split(':')[0]}]: {fleet.kills} kills, {recoveries} recoveries, 180 effects once"
+    )
+    await app.close()
