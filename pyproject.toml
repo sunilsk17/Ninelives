@@ -1,0 +1,69 @@
+[project]
+name = "ninelives"
+version = "0.1.0"
+description = "Durable execution for Python workflows and AI agents: survive crashes, resume from the last step, never repeat a paid LLM call."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Sunil Kumar" }]
+keywords = ["durable-execution", "workflows", "ai-agents", "llm", "postgres", "fault-tolerance"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Framework :: AsyncIO",
+  "License :: OSI Approved :: MIT License",
+  "Topic :: System :: Distributed Computing",
+]
+dependencies = []
+
+[project.optional-dependencies]
+postgres = ["asyncpg>=0.30"]
+server = ["fastapi>=0.115", "uvicorn>=0.32"]
+agents = ["httpx>=0.27"]
+all = ["ninelives[postgres,server,agents]"]
+
+[project.scripts]
+ninelives = "ninelives.cli:main"
+
+[dependency-groups]
+dev = [
+  "ninelives[all]",
+  "pytest>=8.3",
+  "pytest-asyncio>=0.24",
+  "pytest-cov>=6.0",
+  "ruff>=0.8",
+  "mypy>=1.13",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ninelives"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+markers = [
+  "postgres: needs a Postgres server (NINELIVES_TEST_POSTGRES_DSN)",
+  "chaos: multi-process crash tests (slower)",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "ASYNC", "SIM", "RUF"]
+ignore = ["E501", "RUF001", "RUF002", "RUF003", "SIM105", "B008"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_ignores = false
+packages = ["ninelives"]
+
+[[tool.mypy.overrides]]
+module = ["asyncpg", "asyncpg.*", "uvicorn"]
+ignore_missing_imports = true
