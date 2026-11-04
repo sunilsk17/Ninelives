@@ -29,7 +29,7 @@ async def _postgres_store() -> Store:
     store = PostgresStore(PG_DSN or "")
     await store.init()
     pool = await store._get_pool()
-    await pool.execute("TRUNCATE workflows, journal, attempts, signals RESTART IDENTITY")
+    await pool.execute("TRUNCATE workflows, journal, attempts, signals, events, schedules RESTART IDENTITY")
     return store
 
 

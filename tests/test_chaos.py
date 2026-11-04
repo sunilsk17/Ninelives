@@ -51,7 +51,7 @@ async def store_url(request: pytest.FixtureRequest, tmp_path: Path) -> str:
     pg = PostgresStore(PG_DSN)
     await pg.init()
     pool = await pg._get_pool()
-    await pool.execute("TRUNCATE workflows, journal, attempts, signals RESTART IDENTITY")
+    await pool.execute("TRUNCATE workflows, journal, attempts, signals, events, schedules RESTART IDENTITY")
     await pg.close()
     return PG_DSN
 

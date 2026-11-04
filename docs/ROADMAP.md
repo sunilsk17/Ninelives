@@ -11,8 +11,8 @@ Status legend: ✅ done · 🚧 in progress · ⏳ planned
 
 | # | Item | Why (research §) | Status |
 |---|---|---|---|
-| 1 | Schema migrations | Upgrades must not need manual SQL (§4) | ⏳ |
-| 2 | One transaction per finished step | Hot-path cost; Postgres queue guidance (§3.3) | ⏳ |
+| 1 | Schema migrations | Upgrades must not need manual SQL (§4) | ✅ |
+| 2 | One transaction per finished step | Hot-path cost; Postgres queue guidance (§3.3) | ✅ |
 | 3 | `ctx.patched()` versioning | Main production failure mode (§3.1) | ⏳ |
 | 4 | Events: `ctx.set_event` / `app.get_event` | Progress and results while running (§2) | ⏳ |
 | 5 | Child workflows and `ctx.send` | Composition (§2, §5.1) | ⏳ |
@@ -44,9 +44,9 @@ covers a step's final failure. Measured with `benchmarks/bench.py` before and af
 ### 3. `ctx.patched(patch_id)`
 ```python
 if await ctx.patched("send-sms"):
-    await send_sms(order)        # new code
+    await send_sms(order)  # new code
 else:
-    await send_email(order)      # what runs that started earlier still do
+    await send_email(order)  # what runs that started earlier still do
 ```
 - **Replaying** (the next journal position exists): returns `True` and consumes the position only if that entry is the marker `patch:<id>`. Otherwise it returns `False` without consuming anything, because the run executed this point before the patch existed.
 - **Not replaying:** journals the marker and returns `True`.
@@ -62,10 +62,10 @@ as "Progress". Use them for progress bars, partial results and agent status.
 
 ### 5. Child workflows, `ctx.send`
 ```python
-child_id = await ctx.start_child(resize, image_id)          # durable; id defaults to "<parent>/<seq>"
-result   = await ctx.wait_child(child_id, timeout=3600)     # raises ChildFailed
-result   = await ctx.child(resize, image_id)                # both at once
-await ctx.send(other_id, "go", payload)                     # signal another run, exactly once
+child_id = await ctx.start_child(resize, image_id)  # durable; id defaults to "<parent>/<seq>"
+result = await ctx.wait_child(child_id, timeout=3600)  # raises ChildFailed
+result = await ctx.child(resize, image_id)  # both at once
+await ctx.send(other_id, "go", payload)  # signal another run, exactly once
 ```
 - **Starting.** `start_child` journals the start and creates the child row (with `parent_id` and `parent_seq`) in one fenced transaction. A replay finds the journaled id and creates nothing.
 - **Completion.** When a child finishes, the same transaction inserts a signal `child:<id>` into the parent with `{status, output, error}` and wakes the parent. `wait_child` is a signal wait, so it is durable, costs nothing while waiting, and needs no polling.
@@ -110,10 +110,11 @@ SQLite keeps polling.
 ### 11. Testing helpers and sync client
 ```python
 from ninelives.testing import TestEnv
-async with TestEnv(app) as env:                 # in-memory store, fake clock, no threads
+
+async with TestEnv(app) as env:  # in-memory store, fake clock, no threads
     run = await env.start(checkout, "o-1")
     await env.run_until_idle()
-    await env.advance(3600)                     # moves the clock and runs what woke up
+    await env.advance(3600)  # moves the clock and runs what woke up
     assert await env.result(run) == {...}
 ```
 `ninelives.SyncClient(app)` exposes `start`, `result`, `signal`, `cancel`, `get` and `get_event`

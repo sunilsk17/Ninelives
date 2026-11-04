@@ -58,7 +58,9 @@ async def reset(store: str) -> Ninelives:
     await app.init()
     if store.startswith("postgres"):
         pool = await app.store._get_pool()  # type: ignore[attr-defined]
-        await pool.execute("TRUNCATE workflows, journal, attempts, signals RESTART IDENTITY")
+        await pool.execute(
+            "TRUNCATE workflows, journal, attempts, signals, events, schedules RESTART IDENTITY"
+        )
     return app
 
 

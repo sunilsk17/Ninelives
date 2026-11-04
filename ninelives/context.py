@@ -285,6 +285,14 @@ class WorkflowContext:
             raise _Abandon() from exc
         self._journal[entry.seq] = entry
 
+    async def _complete(self, entry: JournalEntry, attempt: int, attempt_error: str | None) -> None:
+        """Close the attempt and journal the step's outcome in one transaction."""
+        try:
+            await self._store.complete_step(self._token, entry, attempt, self._clock(), attempt_error)
+        except LeaseLost as exc:
+            raise _Abandon() from exc
+        self._journal[entry.seq] = entry
+
     async def _guard(self, coro: Awaitable[Any]) -> Any:
         try:
             return await coro
@@ -318,12 +326,11 @@ class WorkflowContext:
                     "type": "RetriesExhausted",
                     "message": f"{attempt - 1} attempts used (max {policy.max_attempts})",
                 }
-                await self._guard(
-                    self._store.finish_attempt(
-                        self._token, self.workflow_id, seq, attempt, self._clock(), "budget exhausted"
-                    )
+                await self._complete(
+                    self._failed_entry(seq, spec.name, error, attempt - 1, started),
+                    attempt,
+                    "budget exhausted",
                 )
-                await self._write(self._failed_entry(seq, spec.name, error, attempt - 1, started))
                 raise StepFailed(spec.name, error)
             token = _current_step.set(StepInfo(self.workflow_id, seq, spec.name, attempt))
             failure: Exception | None = None
@@ -336,21 +343,19 @@ class WorkflowContext:
             finally:
                 _current_step.reset(token)
             if failure is not None:
-                await self._guard(
-                    self._store.finish_attempt(
-                        self._token,
-                        self.workflow_id,
-                        seq,
-                        attempt,
-                        self._clock(),
-                        f"{type(failure).__name__}: {failure}",
-                    )
-                )
+                attempt_error = f"{type(failure).__name__}: {failure}"
                 permanent = isinstance(failure, (PermanentError, *policy.non_retryable))
                 if permanent or attempt >= policy.max_attempts:
                     error = serde.error_dict(failure)
-                    await self._write(self._failed_entry(seq, spec.name, error, attempt, started))
+                    await self._complete(
+                        self._failed_entry(seq, spec.name, error, attempt, started), attempt, attempt_error
+                    )
                     raise StepFailed(spec.name, error) from failure
+                await self._guard(
+                    self._store.finish_attempt(
+                        self._token, self.workflow_id, seq, attempt, self._clock(), attempt_error
+                    )
+                )
                 delay = policy.delay(attempt)
                 log.info(
                     "step %s of %s failed (attempt %d), retrying in %.2fs",
@@ -377,10 +382,7 @@ class WorkflowContext:
                     )
                 )
                 raise
-            await self._guard(
-                self._store.finish_attempt(self._token, self.workflow_id, seq, attempt, self._clock(), None)
-            )
-            await self._write(
+            await self._complete(
                 JournalEntry(
                     workflow_id=self.workflow_id,
                     seq=seq,
@@ -391,7 +393,9 @@ class WorkflowContext:
                     attempts=attempt,
                     started_at=started,
                     completed_at=self._clock(),
-                )
+                ),
+                attempt,
+                None,
             )
             return value
 

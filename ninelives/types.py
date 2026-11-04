@@ -53,6 +53,17 @@ class WorkflowRecord:
     cancel_requested: bool = False
     forked_from: str | None = None
     fork_seq: int | None = None
+    #: The run that started this one with ctx.start_child, and the journal position of that call.
+    parent_id: str | None = None
+    parent_seq: int | None = None
+    #: Higher runs first when several are waiting to be claimed.
+    priority: int = 0
+    #: Runs sharing a key count together against the workflow's ``key_concurrency`` limit.
+    concurrency_key: str | None = None
+    #: Epoch seconds after which the run fails with WorkflowTimeout.
+    deadline: float | None = None
+    #: The schedule that started this run, if any.
+    schedule_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -72,6 +83,12 @@ class WorkflowRecord:
             "cancel_requested": self.cancel_requested,
             "forked_from": self.forked_from,
             "fork_seq": self.fork_seq,
+            "parent_id": self.parent_id,
+            "parent_seq": self.parent_seq,
+            "priority": self.priority,
+            "concurrency_key": self.concurrency_key,
+            "deadline": self.deadline,
+            "schedule_id": self.schedule_id,
         }
 
 
@@ -141,6 +158,76 @@ class Signal:
             "payload": self.payload,
             "created_at": self.created_at,
             "consumed_seq": self.consumed_seq,
+        }
+
+
+@dataclass
+class Event:
+    """A key/value pair a workflow published with ``ctx.set_event``."""
+
+    workflow_id: str
+    key: str
+    value: Any
+    updated_at: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"key": self.key, "value": self.value, "updated_at": self.updated_at}
+
+
+@dataclass(frozen=True)
+class Limit:
+    """Concurrency limits of one workflow type. ``None`` means unlimited."""
+
+    concurrency: int | None = None
+    key_concurrency: int | None = None
+
+
+@dataclass(frozen=True)
+class ScheduleDef:
+    """A schedule as declared in code with ``app.schedule(...)``."""
+
+    id: str
+    workflow: str
+    cron: str
+    tz: str = "UTC"
+    input: dict[str, Any] = field(default_factory=lambda: {"args": [], "kwargs": {}})
+    #: "skip": do not start a tick while the previous run is unfinished. "allow": always start.
+    overlap: str = "skip"
+
+
+@dataclass
+class Schedule:
+    """A schedule as stored, with its firing state."""
+
+    id: str
+    workflow: str
+    cron: str
+    tz: str
+    input: dict[str, Any]
+    overlap: str
+    enabled: bool
+    next_at: float | None
+    last_at: float | None
+    last_run_id: str | None
+    created_at: float
+    updated_at: float
+    seen_at: float | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "workflow": self.workflow,
+            "cron": self.cron,
+            "tz": self.tz,
+            "input": self.input,
+            "overlap": self.overlap,
+            "enabled": self.enabled,
+            "next_at": self.next_at,
+            "last_at": self.last_at,
+            "last_run_id": self.last_run_id,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "seen_at": self.seen_at,
         }
 
 
