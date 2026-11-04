@@ -43,7 +43,8 @@ flowchart LR
 - **Store:** all durable state. Two implementations share one contract and one test suite: `SQLiteStore` (single machine; WAL; works across processes) and `PostgresStore` (asyncpg; `FOR UPDATE SKIP LOCKED` claiming).
 - **Worker:** polls the store, claims runnable workflows with a lease, executes them, heartbeats, and records outcomes.
 - **WorkflowContext:** the deterministic replay machinery inside a running workflow.
-- **Agents:** a durable tool-calling loop over any LLM provider (Anthropic, OpenAI-compatible, or a scripted fake for tests).
+- **Agents:** a durable tool-calling loop over an `LLM` protocol, with an Anthropic provider (official SDK) and a scripted stand-in for tests and offline demos.
+- **CLI:** `ninelives worker | serve | start | status | signal | cancel | ls`.
 - **Server:** FastAPI endpoints and a React dashboard.
 
 ## Data model
@@ -72,7 +73,9 @@ When a worker picks a workflow up, it re-runs the function from the top. Complet
 
 **Determinism check.** Each journal entry stores the operation's kind and name. If replay reaches `seq` 3 expecting `step:charge_card` but the code now calls `step:send_email`, the workflow fails with `NonDeterminismError` instead of silently corrupting state.
 
-**Suspension.** `sleep` and `wait_for_signal` raise an internal `Suspend`. The worker catches it, stores `status=WAITING` with the earliest `wake_at` (or none, for waits without a timeout), and releases the lease. Sending a signal sets `wake_at = now` so the workflow is picked up immediately.
+**Suspension.** `sleep` and `wait_for_signal` raise an internal `Suspend`. The worker catches it, stores `status=WAITING` with the earliest `wake_at` (or none, for waits without a timeout), and releases the lease. Sending a signal sets `wake_at = now` so the workflow is picked up immediately. Suspension also checks for a matching signal that arrived while the workflow was running, so a signal sent between "no signal yet" and "suspend" is never lost. Sleeps of one second or less run in-process instead of suspending.
+
+**Concurrency inside a workflow.** Sequence numbers must not depend on timing. `asyncio.gather` over single steps is safe, because each step takes its number when its task starts, in argument order. Branches that make several durable calls each must use `ctx.gather(...)`, which hands out numbers round-robin over the branches that have not finished. A branch parked on a long sleep or a signal keeps its place in the rotation, so its siblings pause at their next durable call and the workflow suspends until the earliest wake-up. That keeps numbering a function of the code and the journal alone. A raw `asyncio.gather` branch that makes a second durable call fails with `NonDeterminismError` rather than replaying wrongly.
 
 ## Leases and fencing
 
@@ -96,9 +99,11 @@ Clocks: lease expiry compares worker clocks. Leases are seconds long, so NTP-lev
 An agent is a workflow registered as `agent:<name>`. Each turn has two kinds of step:
 
 1. An `llm` step sends the conversation and tool schemas to the provider. The normalised response, with token usage, is journaled, so recovery never repeats a paid call.
-2. For each tool call, a `tool:<name>` step runs the Python function with its own idempotency key. Tools listed in `approval_required` first wait for a signal `approval:<call_id>` (`{"approved": true|false, "note": ...}`) with a timeout. A denial is reported back to the model as the tool result.
+2. For each tool call, a `tool:<name>` step runs the Python function with its own idempotency key. Tools declared with `@tool(requires_approval=True)` first wait for a signal `approval:<call_id>` (`{"approved": true|false, "note": ...}`) with a timeout; a timeout counts as a denial. A denial, an unknown tool, arguments that do not match the function signature, and a tool that fails after its retries are all reported back to the model as `is_error` tool results, so the model can recover.
 
-Budgets stop the loop: maximum turns and maximum total tokens. Tool schemas are generated from Python signatures and docstrings. Providers convert between a neutral message format and the Anthropic Messages API or OpenAI-compatible chat completions; `ScriptedLLM` replays fixed responses for tests and demos.
+All tool results of one turn go back in a single user message. The assistant's content blocks are appended to the conversation unchanged, so provider-specific blocks (thinking, server tools) round-trip intact. Budgets stop the loop: maximum turns and maximum total tokens. A `refusal` stop reason ends the run with status `refused`; `pause_turn` continues it. Tool schemas are generated from Python type hints and docstrings.
+
+`AnthropicLLM` uses the official `anthropic` SDK. Bad-request, authentication, permission and not-found errors become `PermanentError`, so they fail fast. Rate limits, 5xx responses and connection errors are retried with backoff by the step's retry policy. Server-side model fallbacks are enabled by default. `ScriptedLLM` takes a list of replies or a function of the conversation; it is used by the tests and by the offline demo.
 
 ## HTTP API
 
@@ -106,11 +111,14 @@ Budgets stop the loop: maximum turns and maximum total tokens. Tool schemas are 
 | --- | --- | --- |
 | `POST` | `/api/workflows/{name}` | Start (body `{"args": [], "kwargs": {}, "id": optional}`); idempotent when `id` is given |
 | `GET` | `/api/workflows` | List with `status`, `name`, `limit`, `offset` |
-| `GET` | `/api/workflows/{id}` | Detail: record, journal, attempts, signals |
+| `GET` | `/api/workflows/{id}` | Detail: record, journal, attempts, signals, and pending agent approvals (tool name and arguments) |
 | `POST` | `/api/workflows/{id}/signals/{name}` | Send a signal (body = payload) |
 | `POST` | `/api/workflows/{id}/cancel` | Request cancellation |
 | `POST` | `/api/workflows/{id}/fork` | Copy the journal up to `from_seq` into a new run and re-execute from there |
 | `GET` | `/api/stats` | Counts by status, registered workflows |
+| `GET` | `/api/health` | Liveness |
+
+The same server hosts the dashboard at `/` and OpenAPI docs at `/docs`. It has no authentication: it binds to `127.0.0.1` by default, and anything beyond a laptop belongs behind an authenticating proxy.
 
 ## Testing strategy
 
@@ -119,7 +127,18 @@ Budgets stop the loop: maximum turns and maximum total tokens. Tool schemas are 
 | Store contract tests, run against SQLite and Postgres | Claiming, fencing, signals and suspension behave identically on both backends |
 | Engine tests | Replay, retries, timers, signals, cancellation, fork, non-determinism detection, serialization |
 | Concurrency tests | Many workers, no workflow executed by two workers at once, no lost workflows |
-| Fencing test | A paused worker whose lease was taken cannot write |
-| Chaos test | Worker processes are `SIGKILL`ed at random while 50+ workflows run; all finish, the external ledger holds each effect exactly once, and the journal has no gaps |
-| Agent tests | Tool loop, approvals, denials, budgets, resume without repeating LLM calls, provider message conversion |
-| API and dashboard | Endpoints and a browser test of the dashboard against a live server |
+| Fencing tests | A paused worker whose lease was taken cannot write; a worker that re-claims its own lapsed run stops the stale execution |
+| Concurrency inside a workflow | `ctx.gather` numbering is round-robin and survives full replays under different timings, parking and crashes mid-branch |
+| Chaos test | Four worker processes are `SIGKILL`ed (15 times) and `SIGSTOP`ped past their lease at random while 80 six-step workflows run, on SQLite and on Postgres. Every run succeeds, an external ledger holds each of the 480 effects exactly once, journals have no gaps, and recoveries really happened. |
+| Agent tests | Tool loop, approvals, denials, approval timeout, budgets, refusal, resume without repeating LLM calls, Anthropic request shape and error mapping |
+| API and CLI | Every endpoint and error code; CLI commands, including a real worker process killed and restarted |
+| Dashboard | Playwright tests against a live `ninelives serve`: start runs, send signals, approve/deny agent actions, fork, cancel, filters, mobile layout |
+
+## Known limitations
+
+- **Steps are at least once.** Exactly-once effects need the idempotency key to reach the external system.
+- **Timeouts on synchronous steps.** A step that hits its timeout fails, but a synchronous (`def`) step keeps running in its thread until it returns, because Python cannot kill threads. Prefer `async def` steps when timeouts matter.
+- **Changing workflow code.** Changing code while runs are in flight is detected (`NonDeterminismError`), not migrated. Finish or cancel old runs first, or fork them after the fix.
+- **Recoveries.** The `recoveries` counter also counts the handover after a graceful shutdown, not only crashes.
+- **Polling.** Workers poll the store (200 ms by default) instead of using `LISTEN/NOTIFY`, which keeps both backends identical.
+- **Not included in v1:** child workflows, cron schedules, authentication, multi-region.

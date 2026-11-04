@@ -18,6 +18,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -62,13 +63,15 @@ class Fleet:
         self.env = env
         self.log_dir = log_dir
         self.procs: list[subprocess.Popen[bytes]] = []
+        self.logs: list[object] = []
         self.kills = 0
         self.freezes = 0
         self.spawned = 0
 
     def spawn(self) -> None:
         self.spawned += 1
-        log = open(self.log_dir / f"worker-{self.spawned}.log", "wb")  # noqa: SIM115 - closed with the process
+        log = open(self.log_dir / f"worker-{self.spawned}.log", "wb")  # noqa: SIM115 - closed in stop()
+        self.logs.append(log)
         cmd = [
             sys.executable, "-m", "ninelives", "worker", f"{HERE / 'chaos_app.py'}:app",
             "--lease-ttl", str(LEASE_TTL), "--poll", "0.02", "--concurrency", "2",
@@ -101,6 +104,8 @@ class Fleet:
             except subprocess.TimeoutExpired:
                 p.kill()
                 p.wait()
+        for log in self.logs:
+            log.close()  # type: ignore[attr-defined]
 
 
 async def test_workers_killed_and_frozen_at_random(store_url: str, tmp_path: Path) -> None:
@@ -158,7 +163,7 @@ async def test_workers_killed_and_frozen_at_random(store_url: str, tmp_path: Pat
         assert seqs == list(range(1, len(seqs) + 1)), (wf_id, seqs)
 
     # 2. Side effects: exactly once each, even though some bodies ran more than once.
-    with sqlite3.connect(ledger) as db:
+    with closing(sqlite3.connect(ledger)) as db, db:
         effects = db.execute(
             "SELECT COUNT(*), COUNT(DISTINCT workflow_id || ':' || seq) FROM ledger"
         ).fetchone()

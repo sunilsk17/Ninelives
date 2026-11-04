@@ -1,0 +1,11 @@
+.git
+.venv
+**/__pycache__
+**/*.db*
+dashboard/node_modules
+dashboard/test-results
+dashboard/playwright-report
+.pytest_cache
+.mypy_cache
+.ruff_cache
+htmlcov

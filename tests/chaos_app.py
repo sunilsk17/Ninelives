@@ -12,6 +12,7 @@ import asyncio
 import os
 import random
 import sqlite3
+from contextlib import closing
 
 from ninelives import Ninelives, RetryPolicy, step_info
 
@@ -21,7 +22,7 @@ STEPS = int(os.environ.get("CHAOS_STEPS", "6"))
 
 
 def setup_ledger(path: str) -> None:
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         db.execute("PRAGMA journal_mode=WAL")
         db.execute("CREATE TABLE IF NOT EXISTS executions (workflow_id TEXT, seq INTEGER, pid INTEGER)")
         db.execute(

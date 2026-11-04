@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python:
+    name: Python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ninelives_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      NINELIVES_TEST_POSTGRES_DSN: postgresql://postgres:postgres@localhost:5432/ninelives_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - run: uv sync --all-extras
+      - name: Lint
+        run: uv run ruff check . && uv run ruff format --check .
+      - name: Types
+        run: uv run mypy ninelives
+      - name: Tests (SQLite + Postgres, including chaos)
+        run: uv run pytest -q --cov=ninelives --cov-report=term
+
+  dashboard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - run: uv sync --all-extras
+      - name: Build
+        working-directory: dashboard
+        run: npm ci && npm run build
+      - name: Committed build is up to date
+        run: git diff --exit-code -- ninelives/server/static || (echo "Run 'npm run build' in dashboard/ and commit ninelives/server/static" && exit 1)
+      - name: Browser tests
+        working-directory: dashboard
+        run: npx playwright install --with-deps chromium && npm run e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: dashboard/playwright-report
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start Postgres, API and workers
+        run: docker compose up --build --wait
+      - name: Run a workflow end to end
+        run: |
+          curl -fsS -X POST localhost:8000/api/workflows/expense -H 'content-type: application/json' \
+            -d '{"args": ["ci", 10], "id": "ci-expense"}'
+          for i in $(seq 1 30); do
+            status=$(curl -fsS localhost:8000/api/workflows/ci-expense | python3 -c 'import json,sys; print(json.load(sys.stdin)["workflow"]["status"])')
+            [ "$status" = "SUCCEEDED" ] && exit 0
+            sleep 1
+          done
+          echo "workflow did not finish: $status" && exit 1
+      - if: always()
+        run: docker compose logs --tail 100 && docker compose down -v
