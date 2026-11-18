@@ -18,7 +18,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
-from . import serde
+from . import serde, tracing
 from .errors import (
     Cancelled,
     ChildFailed,
@@ -360,14 +360,22 @@ class WorkflowContext:
                 raise StepFailed(spec.name, error)
             token = _current_step.set(StepInfo(self.workflow_id, seq, spec.name, attempt))
             failure: Exception | None = None
-            try:
-                result = await self._invoke(spec, args, kwargs)
-            except (asyncio.CancelledError, _Abandon, _Suspend):
-                raise
-            except Exception as exc:
-                failure = exc
-            finally:
-                _current_step.reset(token)
+            attributes = {
+                "ninelives.workflow.id": self.workflow_id,
+                "ninelives.step.name": spec.name,
+                "ninelives.step.seq": seq,
+                "ninelives.step.attempt": attempt,
+            }
+            with tracing.span(f"ninelives.step {spec.name}", attributes) as step_span:
+                try:
+                    result = await self._invoke(spec, args, kwargs)
+                except (asyncio.CancelledError, _Abandon, _Suspend):
+                    raise
+                except Exception as exc:
+                    failure = exc
+                    tracing.set_error(step_span, exc)
+                finally:
+                    _current_step.reset(token)
             if failure is not None:
                 attempt_error = f"{type(failure).__name__}: {failure}"
                 permanent = isinstance(failure, (PermanentError, *policy.non_retryable))

@@ -12,7 +12,7 @@ import time
 import uuid
 from typing import TYPE_CHECKING, Any
 
-from . import serde
+from . import serde, tracing
 from .context import WorkflowContext, _Abandon, _current_ctx, _Suspend
 from .errors import Cancelled, LeaseLost
 from .types import Status, WorkflowRecord
@@ -214,50 +214,67 @@ class Worker:
         spec = self.app.workflows[rec.name]
         current = asyncio.current_task()
         assert current is not None
-        hb: asyncio.Task[None] | None = None
-        try:
-            journal = {e.seq: e for e in await store.get_journal(rec.id)}
-            ctx = WorkflowContext(self.app, rec, token, self.worker_id, journal)
-            hb = asyncio.create_task(self._heartbeat(rec, ctx, current))
-            ctx_token = _current_ctx.set(ctx)
+        attributes = {
+            "ninelives.workflow.id": rec.id,
+            "ninelives.workflow.name": rec.name,
+            "ninelives.execution": rec.runs,
+            "ninelives.recovery": rec.recoveries > 0,
+            "ninelives.worker": self.worker_id,
+        }
+        with tracing.span(f"ninelives.run {rec.name}", attributes) as sp:
+            hb: asyncio.Task[None] | None = None
             try:
-                args = rec.input.get("args", [])
-                kwargs = rec.input.get("kwargs", {})
-                output = await spec.fn(ctx, *args, **kwargs)
+                journal = {e.seq: e for e in await store.get_journal(rec.id)}
+                ctx = WorkflowContext(self.app, rec, token, self.worker_id, journal)
+                hb = asyncio.create_task(self._heartbeat(rec, ctx, current))
+                ctx_token = _current_ctx.set(ctx)
+                try:
+                    args = rec.input.get("args", [])
+                    kwargs = rec.input.get("kwargs", {})
+                    output = await spec.fn(ctx, *args, **kwargs)
+                finally:
+                    _current_ctx.reset(ctx_token)
+                await store.finish(
+                    token, rec.id, Status.SUCCEEDED, serde.loads(serde.dumps(output)), None, self.app.clock()
+                )
+                self.completed += 1
+                sp.set_attribute("ninelives.outcome", "succeeded")
+            except _Suspend as s:
+                await self._safe(store.suspend(token, rec.id, s.wake_at, s.waiting_for, self.app.clock()))
+                sp.set_attribute("ninelives.outcome", "waiting")
+            except (_Abandon, LeaseLost):
+                log.info("abandoning %s: another worker owns it now", rec.id)
+                sp.set_attribute("ninelives.outcome", "abandoned")
+            except Cancelled as exc:
+                sp.set_attribute("ninelives.outcome", "cancelled")
+                await self._safe(
+                    store.finish(
+                        token, rec.id, Status.CANCELLED, None, serde.error_dict(exc), self.app.clock()
+                    )
+                )
+            except asyncio.CancelledError:
+                sp.set_attribute("ninelives.outcome", "abandoned" if current in self._lost else "interrupted")
+                if current in self._lost:
+                    return  # lease lost mid-run; the new owner carries on
+                raise  # worker shutdown: the lease is released in _shutdown
+            except Exception as exc:
+                log.exception("workflow %s failed", rec.id)
+                sp.set_attribute("ninelives.outcome", "failed")
+                tracing.set_error(sp, exc)
+                await self._safe(
+                    store.finish(token, rec.id, Status.FAILED, None, serde.error_dict(exc), self.app.clock())
+                )
             finally:
-                _current_ctx.reset(ctx_token)
-            await store.finish(
-                token, rec.id, Status.SUCCEEDED, serde.loads(serde.dumps(output)), None, self.app.clock()
-            )
-            self.completed += 1
-        except _Suspend as s:
-            await self._safe(store.suspend(token, rec.id, s.wake_at, s.waiting_for, self.app.clock()))
-        except (_Abandon, LeaseLost):
-            log.info("abandoning %s: another worker owns it now", rec.id)
-        except Cancelled as exc:
-            await self._safe(
-                store.finish(token, rec.id, Status.CANCELLED, None, serde.error_dict(exc), self.app.clock())
-            )
-        except asyncio.CancelledError:
-            if current in self._lost:
-                return  # lease lost mid-run; the new owner carries on
-            raise  # worker shutdown: the lease is released in _shutdown
-        except Exception as exc:
-            log.exception("workflow %s failed", rec.id)
-            await self._safe(
-                store.finish(token, rec.id, Status.FAILED, None, serde.error_dict(exc), self.app.clock())
-            )
-        finally:
-            if hb is not None:
-                hb.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await hb
-            lost = current in self._lost
-            self._lost.discard(current)
-            # On shutdown the token is kept so _shutdown can release the lease right away.
-            shutting_down = not lost and (current.cancelled() or current.cancelling() > 0)
-            if not shutting_down and self._tokens.get(rec.id) == token:
-                del self._tokens[rec.id]
+                if hb is not None:
+                    hb.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await hb
+                lost = current in self._lost
+                self._lost.discard(current)
+                # On shutdown the token is kept so _shutdown can release the lease right away.
+                shutting_down = not lost and (current.cancelled() or current.cancelling() > 0)
+                if not shutting_down and self._tokens.get(rec.id) == token:
+                    del self._tokens[rec.id]
 
     async def _safe(self, op: Any) -> None:
         try:
