@@ -16,6 +16,7 @@ from .errors import (
     WorkflowTimeout,
 )
 from .stores import SQLiteStore, Store, open_store
+from .sync import SyncClient
 from .types import RetryPolicy, Schedule, StartOptions, Status, WorkflowRecord
 from .worker import Worker
 
@@ -40,6 +41,7 @@ __all__ = [
     "StepFunction",
     "StepInfo",
     "Store",
+    "SyncClient",
     "Worker",
     "WorkflowContext",
     "WorkflowFailed",

@@ -232,3 +232,7 @@ class Store(ABC):
 
     @abstractmethod
     async def schema_version(self) -> int: ...
+
+    def fresh(self) -> Store:
+        """A store for the same database that is safe to use from another event loop."""
+        return self

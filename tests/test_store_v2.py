@@ -392,3 +392,33 @@ async def test_postgres_notify_wakes_other_processes() -> None:
     finally:
         await a.close()
         await b.close()
+
+
+def _open_and_write(path: str, n: int, start_at: float) -> str:
+    time.sleep(max(0.0, start_at - time.time()))  # all processes open the new file together
+
+    async def go() -> str:
+        store = SQLiteStore(path)
+        await store.init()
+        await store.create_workflow(f"proc-{n}", "wf", {}, T0)
+        await store.close()
+        return "ok"
+
+    return asyncio.run(go())
+
+
+def test_many_processes_can_open_a_new_sqlite_database_at_once(tmp_path: Path) -> None:
+    """Regression: switching a new file to WAL from several processes at once used to fail with
+    'database is locked' in all but one of them."""
+    from concurrent.futures import ProcessPoolExecutor
+
+    with ProcessPoolExecutor(12) as pool:
+        list(pool.map(time.sleep, [0.01] * 12))  # warm the pool up so starts line up
+        for attempt in range(5):
+            path = str(tmp_path / f"race-{attempt}.db")
+            start_at = time.time() + 0.3
+            results = list(pool.map(_open_and_write, [path] * 12, range(12), [start_at] * 12))
+            assert results == ["ok"] * 12
+            with closing(sqlite3.connect(path)) as db:
+                assert db.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+                assert db.execute("SELECT COUNT(*) FROM workflows").fetchone()[0] == 12

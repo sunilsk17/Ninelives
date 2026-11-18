@@ -68,6 +68,8 @@ class Worker:
         self._lost: set[asyncio.Task[Any]] = set()
         self._stopping = asyncio.Event()
         self.completed = 0
+        #: Executions that have ended (any outcome); lets run_until_idle detect work it raced past.
+        self._settled = 0
 
     # ------------------------------------------------------------------ loop
     async def run(self) -> None:
@@ -127,8 +129,11 @@ class Worker:
         deadline = loop.time() + timeout
         while True:
             await self._housekeeping(force=True)
+            settled = self._settled
             claimed = await self._claim_once()
-            if claimed == 0 and not self._running:
+            # Idle only if nothing finished while we looked: a task that ends during the claim
+            # can create work the claim did not see (a woken parent, a freed concurrency slot).
+            if claimed == 0 and not self._running and settled == self._settled:
                 return
             if loop.time() > deadline:
                 raise TimeoutError("worker did not become idle")
@@ -165,6 +170,7 @@ class Worker:
         return len(records)
 
     def _forget(self, wf_id: str, task: asyncio.Task[None]) -> None:
+        self._settled += 1
         if self._running.get(wf_id) is task:
             del self._running[wf_id]
 

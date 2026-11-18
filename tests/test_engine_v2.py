@@ -497,3 +497,28 @@ async def test_fork_hands_over_finished_children_and_copies_events(store: Store)
     await drain(app)
     with pytest.raises(ValueError, match="has not finished"):
         await app.fork(stuck, 2)
+
+
+async def test_run_until_idle_never_stops_with_work_left(store: Store, clock: FakeClock) -> None:
+    """Regression: a task finishing while the worker was claiming could make run_until_idle return
+    with work left (a parent just woken by its child, or a concurrency slot just freed). A claim
+    that returns late makes the window wide enough to hit every time."""
+    app, _ = family(store, clock)
+
+    @app.workflow(concurrency=1)
+    async def limited(ctx, n: int) -> int:
+        return n
+
+    claim = store.claim
+
+    async def late_claim(*args, **kwargs):  # type: ignore[no-untyped-def]
+        claimed = await claim(*args, **kwargs)
+        await asyncio.sleep(0.02)  # running tasks finish meanwhile
+        return claimed
+
+    store.claim = late_claim  # type: ignore[method-assign]
+    parent = await app.start("parent", [2])
+    queued = [await app.start(limited, n) for n in range(3)]
+    await app.worker(lease_ttl=10).run_until_idle()
+    assert (await app.get(parent)).status == Status.SUCCEEDED
+    assert [(await app.get(q)).status for q in queued] == [Status.SUCCEEDED] * 3

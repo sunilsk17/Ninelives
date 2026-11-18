@@ -62,6 +62,9 @@ class PostgresStore(SqlStore):
         self._listen_lock = asyncio.Lock()
         self._sql_cache: dict[str, str] = {}
 
+    def fresh(self) -> PostgresStore:
+        return PostgresStore(self.dsn, self.min_size, self.max_size, listen=self.listen)
+
     async def _get_pool(self) -> Any:
         if self._pool is None:
             self._pool = await asyncpg.create_pool(

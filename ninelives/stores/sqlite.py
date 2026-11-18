@@ -7,8 +7,11 @@ hop no matter how many statements it has.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import random
 import sqlite3
 import threading
+import time
 from collections.abc import Callable
 from typing import Any, TypeVar
 
@@ -48,9 +51,28 @@ class SQLiteStore(SqlStore):
         )
         conn.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")
         if self.path != ":memory:":
-            conn.execute("PRAGMA journal_mode = WAL")
+            self._enable_wal(conn)
             conn.execute("PRAGMA synchronous = NORMAL")
         return conn
+
+    def _enable_wal(self, conn: sqlite3.Connection) -> None:
+        """Switch to WAL. Changing the journal mode needs exclusive access and does not wait on the
+        busy timeout, so when several processes open a new database at once, retry until one of
+        them has done it."""
+        deadline = time.monotonic() + self.busy_timeout_ms / 1000
+        while True:
+            try:
+                conn.execute("PRAGMA journal_mode = WAL")
+                return
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc) and "busy" not in str(exc):
+                    raise
+                with contextlib.suppress(sqlite3.OperationalError):
+                    if str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower() == "wal":
+                        return
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(random.uniform(0.005, 0.03))
 
     @staticmethod
     def _sql(text: str) -> str:
