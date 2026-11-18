@@ -56,10 +56,7 @@ def parse_duration(text: str) -> float:
     """``90``, ``90s``, ``15m``, ``12h``, ``30d`` or ``2w`` -> seconds."""
     value = text.strip().lower()
     try:
-        if value and value[-1] in UNITS:
-            seconds = float(value[:-1]) * UNITS[value[-1]]
-        else:
-            seconds = float(value)
+        seconds = float(value[:-1]) * UNITS[value[-1]] if value and value[-1] in UNITS else float(value)
     except ValueError:
         raise argparse.ArgumentTypeError(f"not a duration: {text!r} (try 90s, 15m, 12h or 30d)") from None
     if seconds <= 0:
