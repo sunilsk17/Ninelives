@@ -319,3 +319,50 @@ async def test_anthropic_llm_without_fallbacks_and_error_mapping() -> None:
     limited = anthropic.RateLimitError("slow down", response=httpx.Response(429, request=request), body=None)
     with pytest.raises(anthropic.RateLimitError):  # retryable: left to the step's retry policy
         await AnthropicLLM(client=FakeClient(FakeMessages(error=limited))).complete(None, [], [])
+
+
+async def test_progress_events_and_parallel_tool_calls(store: Store) -> None:
+    app = Ninelives(store)
+    running = Counter[str]()
+    peak = Counter[str]()
+    order: list[str] = []
+
+    @tool
+    async def fetch(source: str) -> str:
+        """Fetch one source.
+
+        source: which source
+        """
+        running["now"] += 1
+        peak["max"] = max(peak["max"], running["now"])
+        await asyncio.sleep(0.05 if source == "slow" else 0.01)
+        running["now"] -= 1
+        order.append(source)
+        return f"data from {source}"
+
+    llm = ScriptedLLM(
+        [
+            ScriptedLLM.calls_(call("fetch", {"source": "slow"}), call("fetch", {"source": "fast"})),
+            say("Both sources agree."),
+        ]
+    )
+    agent = Agent(app, "researcher", llm=llm, tools=[fetch], publish_progress=True, parallel_tools=True)
+    run = await agent.start("Compare the sources")
+    await app.worker().run_until_idle()
+    out = await agent.result(run)
+    assert out["status"] == "completed" and peak["max"] == 2  # the two tools ran at the same time
+    assert order == ["fast", "slow"]  # the fast one finished first...
+    assert [a["output"] for a in out["actions"]] == [
+        "data from slow",
+        "data from fast",
+    ]  # ...results in call order
+    progress = await app.get_event(run, "agent")
+    assert progress["status"] == "completed" and progress["turn"] == 2
+    kinds = [e.kind for e in await store.get_journal(run)]
+    assert kinds.count("event") == 2 and kinds.count("step") == 4
+    # A replay of the whole run re-executes nothing.
+    calls_before = llm.calls
+    replay = await app.fork(run, 99)
+    await app.worker().run_until_idle()
+    assert (await agent.result(replay))["answer"] == "Both sources agree." and llm.calls == calls_before
+    assert sorted(order) == ["fast", "slow"]

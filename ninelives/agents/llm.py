@@ -1,5 +1,12 @@
-"""LLM providers. Conversations use the Claude Messages API shape (role + content blocks);
-other providers can implement ``LLM`` by converting to and from it."""
+"""LLM providers.
+
+Agents keep conversations in one neutral shape: a list of ``{"role", "content"}`` messages whose
+content is a string or a list of typed blocks (``text``, ``tool_use``, ``tool_result``). A provider
+implements ``LLM.complete`` and converts to and from its own API. Ninelives ships three:
+``AnthropicLLM`` (the official ``anthropic`` SDK), ``OpenAICompatibleLLM`` (any chat-completions
+API in the OpenAI wire format, including local servers) and ``ScriptedLLM`` (offline, for tests
+and demos).
+"""
 
 from __future__ import annotations
 
@@ -40,12 +47,12 @@ def tool_calls_of(content: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 class AnthropicLLM:
-    """Claude through the official ``anthropic`` SDK.
+    """Anthropic's models through the official ``anthropic`` SDK (reads ``ANTHROPIC_API_KEY``).
 
-    Defaults follow current guidance for Claude Opus 5.5: adaptive thinking is always on,
-    so depth is set with ``effort``; tool choice is left to the model (``auto``); and
-    server-side refusal fallbacks are enabled (``fallbacks="default"``), so a declined
-    request is retried on Anthropic's recommended fallback model inside the same call.
+    Defaults follow Anthropic's current guidance for its default model: thinking is adaptive, so
+    depth is set with ``effort``; tool choice is left to the model; and server-side refusal
+    fallbacks are on (``fallbacks="default"``), so a declined request is retried on a fallback
+    model within the same call.
     """
 
     FALLBACK_BETA = "server-side-fallback-2026-07-01"

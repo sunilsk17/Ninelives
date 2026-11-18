@@ -46,7 +46,7 @@ async def setup(store: Store) -> AsyncIterator[tuple[Ninelives, httpx.AsyncClien
 
 async def test_health_and_stats(setup) -> None:
     _, client = setup
-    assert (await client.get("/api/health")).json() == {"status": "ok"}
+    assert (await client.get("/api/health")).json() == {"status": "ok", "version": "0.2.0"}
     await client.post("/api/workflows/calc", json={"args": [2]})
     stats = (await client.get("/api/stats")).json()
     assert stats["counts"]["PENDING"] == 1 and stats["counts"]["SUCCEEDED"] == 0
@@ -210,3 +210,117 @@ async def test_root_serves_the_dashboard_or_a_pointer(setup) -> None:
     else:
         assert "/docs" in r.text
     assert (await client.get("/openapi.json")).json()["info"]["title"] == "Ninelives"
+
+
+# --------------------------------------------------------------------------- v0.2 endpoints
+
+
+def build_v2(store: Store) -> Ninelives:
+    app = build(store)
+
+    @app.workflow()
+    async def family(ctx, n: int) -> int:
+        await ctx.set_event("stage", "children")
+        return await ctx.child("calc", n)
+
+    @app.workflow(name="nightly")
+    async def nightly(ctx) -> str:
+        return "done"
+
+    app.schedule("every-hour", nightly, "@hourly")
+    return app
+
+
+async def test_child_runs_with_slashes_in_their_ids_are_reachable(store: Store) -> None:
+    app = build_v2(store)
+    await app.init()
+    api = create_api(app)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api), base_url="http://test") as client:
+        parent = (await client.post("/api/workflows/family", json={"args": [4], "id": "fam"})).json()["id"]
+        await app.worker().run_until_idle()
+        detail = (await client.get(f"/api/workflows/{parent}")).json()
+        assert detail["workflow"]["output"] == 8
+        assert detail["children"] == [{"id": "fam/2", "name": "calc", "status": "SUCCEEDED", "parent_seq": 2}]
+        child = (await client.get("/api/workflows/fam%2F2")).json()  # how the dashboard encodes ids
+        assert child["workflow"]["parent_id"] == "fam" and child["workflow"]["output"] == 8
+        assert (await client.get("/api/workflows/fam/2")).json()["workflow"]["id"] == "fam/2"
+        assert (await client.get("/api/workflows/fam/events")).json()["events"][0]["value"] == "children"
+        assert (await client.get("/api/workflows/missing/events")).status_code == 404
+        listed = (await client.get("/api/workflows?parent_id=fam")).json()["workflows"]
+        assert [w["id"] for w in listed] == ["fam/2"]
+        assert (await client.post("/api/workflows/fam/2/signals/child:x/y", json=1)).json() == {"ok": True}
+        assert (await client.post("/api/workflows/fam/2/cancel")).json()["status"] == "SUCCEEDED"
+
+
+async def test_start_options_search_and_purge(store: Store) -> None:
+    app = build_v2(store)
+    await app.init()
+    api = create_api(app)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api), base_url="http://test") as client:
+        body = {"args": [1], "id": "order-77", "priority": 9, "concurrency_key": "acme", "timeout": 60}
+        assert (await client.post("/api/workflows/calc", json=body)).status_code == 201
+        rec = (await client.get("/api/workflows/order-77")).json()["workflow"]
+        assert rec["priority"] == 9 and rec["concurrency_key"] == "acme" and rec["deadline"] is not None
+        assert (await client.post("/api/workflows/calc", json={"timeout": 0})).status_code == 422
+        await client.post("/api/workflows/calc", json={"args": [2], "id": "refund-1"})
+        assert [w["id"] for w in (await client.get("/api/workflows?q=order")).json()["workflows"]] == [
+            "order-77"
+        ]
+        await app.worker().run_until_idle()
+        assert (await client.post("/api/purge", json={"older_than": 3600})).json() == {"deleted": 0}
+        assert (await client.post("/api/purge", json={"older_than": 0})).status_code == 422
+
+
+async def test_schedules_endpoints(store: Store) -> None:
+    app = build_v2(store)
+    api = create_api(app)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api), base_url="http://test") as client:
+        await app.worker().run_until_idle()  # workers register the app's schedules
+        [s] = (await client.get("/api/schedules")).json()["schedules"]
+        assert s["id"] == "every-hour" and s["cron"] == "@hourly" and s["enabled"] is True
+        assert (await client.post("/api/schedules/every-hour/pause")).json()["enabled"] is False
+        assert (await client.post("/api/schedules/every-hour/resume")).json()["enabled"] is True
+        run = await client.post("/api/schedules/every-hour/trigger")
+        assert run.status_code == 201 and run.json()["id"].startswith("every-hour@manual-")
+        assert (await client.post("/api/schedules/nope/pause")).status_code == 404
+        assert (await client.post("/api/schedules/nope/trigger")).status_code == 404
+        assert (await client.get("/api/stats")).json()["schedules"] == 1
+
+
+async def test_metrics(store: Store) -> None:
+    app = build_v2(store)
+    await app.init()
+    api = create_api(app)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api), base_url="http://test") as client:
+        await client.post("/api/workflows/calc", json={"args": [1]})
+        text = (await client.get("/metrics")).text
+        assert 'ninelives_runs{workflow="calc",status="PENDING"} 1' in text
+        assert 'ninelives_info{version="0.2.0"} 1' in text and "# TYPE ninelives_runs gauge" in text
+
+
+async def test_api_token(store: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    app = build(store)
+    await app.init()
+    monkeypatch.setenv("NINELIVES_API_TOKEN", "s3cret")
+    api = create_api(app)  # picks the token up from the environment
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api), base_url="http://test") as client:
+        assert (await client.get("/api/health")).status_code == 200  # always open, for probes
+        for path in ("/api/stats", "/api/workflows", "/api/schedules", "/metrics"):
+            denied = await client.get(path)
+            assert denied.status_code == 401 and denied.headers["www-authenticate"] == "Bearer", path
+        assert (await client.get("/api/stats", headers={"Authorization": "Bearer wrong"})).status_code == 401
+        assert (await client.get("/api/stats", headers={"Authorization": "Basic s3cret"})).status_code == 401
+        ok = await client.get("/api/stats", headers={"Authorization": "Bearer s3cret"})
+        assert ok.status_code == 200
+        started = await client.post(
+            "/api/workflows/calc", json={"args": [1]}, headers={"Authorization": "Bearer s3cret"}
+        )
+        assert started.status_code == 201
+        assert (await client.post("/api/workflows/calc", json={"args": [1]})).status_code == 401
+        assert (await client.get("/")).status_code == 200  # the dashboard page itself asks for the token
+    explicit = create_api(app, token="other")
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=explicit), base_url="http://test"
+    ) as client:
+        assert (await client.get("/api/stats", headers={"Authorization": "Bearer s3cret"})).status_code == 401
+        assert (await client.get("/api/stats", headers={"Authorization": "Bearer other"})).status_code == 200

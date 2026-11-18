@@ -34,6 +34,13 @@ APP_SOURCE = textwrap.dedent(
     @app.workflow()
     async def gate(ctx) -> object:
         return await ctx.wait_for_signal("go", timeout=600)
+
+    @app.workflow()
+    async def report(ctx) -> str:
+        await ctx.set_event("rows", 42)
+        return "ok"
+
+    app.schedule("nightly", report, "0 2 * * *")
     """
 )
 
@@ -54,10 +61,10 @@ def run(capsys: pytest.CaptureFixture[str], *argv: str) -> object:
 
 def test_load_app_from_file_and_module(app_file: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     app = load_app(f"{app_file}:app")
-    assert set(app.workflows) == {"calc", "gate"}
+    assert set(app.workflows) == {"calc", "gate", "report"}
     monkeypatch.chdir(app_file.parent)
     sys.modules.pop("cliapp", None)
-    assert set(load_app("cliapp:app").workflows) == {"calc", "gate"}
+    assert set(load_app("cliapp:app").workflows) == {"calc", "gate", "report"}
     with pytest.raises(SystemExit, match="module:attribute"):
         load_app("cliapp")
     with pytest.raises(SystemExit, match="not a Ninelives app"):
@@ -96,7 +103,7 @@ def test_start_with_kwargs_and_wait(app_file: Path, capsys: pytest.CaptureFixtur
         worker.send_signal(signal.SIGTERM)
         output, _ = worker.communicate(timeout=30)
     assert worker.returncode == 0, output
-    assert "running 2 workflow type(s)" in output
+    assert "running 3 workflow type(s)" in output
 
 
 def test_worker_process_resumes_after_restart(app_file: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -127,3 +134,58 @@ def test_worker_process_resumes_after_restart(app_file: Path, capsys: pytest.Cap
 def test_parser_rejects_unknown_status() -> None:
     with pytest.raises(SystemExit):
         build_parser().parse_args(["ls", "x:app", "--status", "nope"])
+
+
+def test_durations() -> None:
+    from argparse import ArgumentTypeError
+
+    from ninelives.cli import parse_duration
+
+    assert [parse_duration(t) for t in ("90", "90s", "15m", "12h", "30d", "2w", "1.5h")] == [
+        90, 90, 900, 43200, 2592000, 1209600, 5400
+    ]  # fmt: skip
+    for bad in ("", "abc", "10x", "-5m", "0"):
+        with pytest.raises(ArgumentTypeError):
+            parse_duration(bad)
+
+
+def test_v2_commands(app_file: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    spec = f"{app_file}:app"
+    started = run(
+        capsys, "start", spec, "calc", "--args", "[2]", "--id", "vip",
+        "--priority", "7", "--concurrency-key", "acme", "--run-timeout", "1h",
+    )  # fmt: skip
+    assert started == {"id": "vip"}
+    record = run(capsys, "status", spec, "vip")["workflow"]  # type: ignore[index]
+    assert record["priority"] == 7 and record["concurrency_key"] == "acme"
+    assert record["deadline"] - record["created_at"] == pytest.approx(3600)
+    run(capsys, "start", spec, "report", "--id", "rep-1")
+    assert [r["id"] for r in run(capsys, "ls", spec, "--search", "rep")] == ["rep-1"]  # type: ignore[union-attr]
+    assert [r["id"] for r in run(capsys, "ls", spec, "--name", "calc")] == ["vip"]  # type: ignore[union-attr]
+    assert run(capsys, "events", spec, "rep-1") == {}
+    assert run(capsys, "purge", spec, "--older-than", "30d") == {"deleted": 0}
+    assert run(capsys, "schedules", spec) == []  # workers register schedules
+    with pytest.raises(SystemExit) as exit_info:
+        main(["events", spec, "missing"])
+    assert exit_info.value.code == 1 and "error: missing" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        main(["schedules", spec, "trigger", "no-such-schedule"])
+    assert "no-such-schedule" in capsys.readouterr().err
+
+
+def test_schedules_and_events_after_a_worker_ran(app_file: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    import asyncio
+
+    spec = f"{app_file}:app"
+    run(capsys, "start", spec, "report", "--id", "rep-2")
+    app = load_app(spec)
+    asyncio.run(app.worker().run_until_idle())
+    asyncio.run(app.close())
+    assert run(capsys, "events", spec, "rep-2") == {"rows": 42}
+    [schedule] = run(capsys, "schedules", spec, "list")  # type: ignore[misc]
+    assert schedule["id"] == "nightly" and schedule["enabled"] is True
+    assert run(capsys, "schedules", spec, "pause", "nightly")["enabled"] is False  # type: ignore[index]
+    assert run(capsys, "schedules", spec, "resume", "nightly")["enabled"] is True  # type: ignore[index]
+    assert run(capsys, "schedules", spec, "trigger", "nightly")["id"].startswith("nightly@manual-")  # type: ignore[index]
+    with pytest.raises(SystemExit, match="needs a schedule id"):
+        main(["schedules", spec, "pause"])

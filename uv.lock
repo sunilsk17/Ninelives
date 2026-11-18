@@ -771,11 +771,13 @@ source = { editable = "." }
 [package.optional-dependencies]
 agents = [
     { name = "anthropic" },
+    { name = "httpx" },
 ]
 all = [
     { name = "anthropic" },
     { name = "asyncpg" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "uvicorn" },
 ]
 postgres = [
@@ -802,6 +804,7 @@ requires-dist = [
     { name = "anthropic", marker = "extra == 'agents'", specifier = ">=1.0" },
     { name = "asyncpg", marker = "extra == 'postgres'", specifier = ">=0.30" },
     { name = "fastapi", marker = "extra == 'server'", specifier = ">=0.115" },
+    { name = "httpx", marker = "extra == 'agents'", specifier = ">=0.27" },
     { name = "ninelives", extras = ["postgres", "server", "agents"], marker = "extra == 'all'" },
     { name = "uvicorn", marker = "extra == 'server'", specifier = ">=0.32" },
 ]

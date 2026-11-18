@@ -2,12 +2,15 @@
 
 from .agent import Agent, approval_signal
 from .llm import LLM, AnthropicLLM, ScriptedLLM, text_of, tool_calls_of
+from .openai_compat import OpenAICompatibleLLM, ProviderError
 from .tools import Tool, json_schema, make_tool, tool
 
 __all__ = [
     "LLM",
     "Agent",
     "AnthropicLLM",
+    "OpenAICompatibleLLM",
+    "ProviderError",
     "ScriptedLLM",
     "Tool",
     "approval_signal",

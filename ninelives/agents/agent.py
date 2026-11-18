@@ -26,13 +26,18 @@ def approval_signal(call_id: str) -> str:
 class Agent:
     """Register a durable agent on ``app``.
 
-    >>> support = Agent(app, "support", llm=AnthropicLLM(), tools=[lookup_order, refund],
+    >>> support = Agent(app, "support", llm=OpenAICompatibleLLM("my-model"), tools=[lookup_order, refund],
     ...                 system="You are a support agent.", max_turns=10)
     >>> run_id = await support.start("Customer 42 wants a refund for order A-17")
 
     Each run is a workflow named ``agent:<name>``. Crash it at any point and it resumes from the
     last finished LLM call or tool call, without paying for the same tokens twice. Tools created
     with ``requires_approval=True`` pause the run until ``approve()`` (or the dashboard) answers.
+
+    ``publish_progress=True`` publishes an ``agent`` event after every turn (turn, tokens, last
+    tools, status) for dashboards and clients. ``parallel_tools=True`` runs the tool calls of one
+    turn concurrently (results still go back in call order). Both change the run's journal, so
+    turn them on for new agents, or with ``ctx.patched`` thinking, not under runs in flight.
     """
 
     def __init__(
@@ -47,6 +52,8 @@ class Agent:
         max_total_tokens: int | None = None,
         approval_timeout: float | None = 24 * 3600,
         llm_retry: RetryPolicy = LLM_RETRY,
+        publish_progress: bool = False,
+        parallel_tools: bool = False,
     ):
         self.app = app
         self.name = name
@@ -55,6 +62,8 @@ class Agent:
         self.max_turns = max_turns
         self.max_total_tokens = max_total_tokens
         self.approval_timeout = approval_timeout
+        self.publish_progress = publish_progress
+        self.parallel_tools = parallel_tools
         self.tools: dict[str, Tool] = {}
         for t in tools:
             spec = t if isinstance(t, Tool) else make_tool(t)
@@ -92,7 +101,14 @@ class Agent:
         usage = {"input_tokens": 0, "output_tokens": 0}
         actions: list[dict[str, Any]] = []
 
-        def finish(status: str, answer: str | None = None, **extra: Any) -> dict[str, Any]:
+        async def progress(status: str, tools: list[str]) -> None:
+            if self.publish_progress:
+                await ctx.set_event(
+                    "agent", {"status": status, "turn": turn + 1, "usage": dict(usage), "last_tools": tools}
+                )
+
+        async def finish(status: str, answer: str | None = None, **extra: Any) -> dict[str, Any]:
+            await progress(status, [])
             return {
                 "status": status,
                 "answer": answer,
@@ -111,18 +127,21 @@ class Agent:
             content = response.get("content", [])
             if stop == "refusal":
                 # Server-side fallbacks (if enabled) already tried another model.
-                return finish("refused", None, details=response.get("stop_details"))
+                return await finish("refused", None, details=response.get("stop_details"))
             # Append the turn unchanged so thinking blocks and other provider blocks round-trip.
             messages.append({"role": "assistant", "content": content})
             if stop == "pause_turn":
                 continue
             calls = tool_calls_of(content)
             if not calls:
-                return finish("completed", text_of(content), stop_reason=stop)
+                return await finish("completed", text_of(content), stop_reason=stop)
 
-            results: list[dict[str, Any]] = []
-            for call in calls:
-                results.append(await self._run_tool(ctx, call, actions))
+            await progress("running tools", [c["name"] for c in calls])
+            results: list[dict[str, Any]]
+            if self.parallel_tools and len(calls) > 1:
+                results = await ctx.gather(*(self._run_tool(ctx, call, actions) for call in calls))
+            else:
+                results = [await self._run_tool(ctx, call, actions) for call in calls]
             # All results of one turn go back in a single user message.
             messages.append({"role": "user", "content": results})
 
@@ -130,8 +149,8 @@ class Agent:
                 self.max_total_tokens is not None
                 and usage["input_tokens"] + usage["output_tokens"] >= self.max_total_tokens
             ):
-                return finish("budget_exhausted", text_of(content))
-        return finish("max_turns", text_of(messages[-2]["content"]) if len(messages) >= 2 else None)
+                return await finish("budget_exhausted", text_of(content))
+        return await finish("max_turns", text_of(messages[-2]["content"]) if len(messages) >= 2 else None)
 
     async def _run_tool(
         self, ctx: WorkflowContext, call: dict[str, Any], actions: list[dict[str, Any]]

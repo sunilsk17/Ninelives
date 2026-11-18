@@ -12,8 +12,12 @@ Start runs from the dashboard, or from the command line:
     ninelives start examples/shop.py:app expense --args '["dana", 1200]'
     ninelives start examples/shop.py:app agent:support --args '["Please refund order A-1001, it arrived broken"]'
 
-The support agent uses Claude when ANTHROPIC_API_KEY is set and a scripted stand-in otherwise,
-so the whole demo works offline.
+The support agent needs a language model. With no configuration it uses a scripted stand-in, so
+the whole demo works offline. To use a real model, set one of:
+
+    LLM_MODEL=<model> [LLM_BASE_URL=<url>] [LLM_API_KEY=<key>]   # any OpenAI-compatible API, or a local
+                                                                 # server such as Ollama or vLLM
+    ANTHROPIC_API_KEY=<key> [LLM_MODEL=<model>]                  # Anthropic's API
 """
 
 from __future__ import annotations
@@ -34,7 +38,7 @@ from ninelives import (
     WorkflowContext,
     step_info,
 )
-from ninelives.agents import Agent, AnthropicLLM, ScriptedLLM, tool
+from ninelives.agents import LLM, Agent, AnthropicLLM, OpenAICompatibleLLM, ScriptedLLM, tool
 
 app = Ninelives(os.environ.get("NINELIVES_DB", "sqlite:///shop.db"))
 
@@ -187,7 +191,21 @@ def scripted_support(messages: list[dict[str, Any]]) -> dict[str, Any]:
     )
 
 
-llm = AnthropicLLM(effort="medium") if os.environ.get("ANTHROPIC_API_KEY") else ScriptedLLM(scripted_support)
+def choose_llm() -> LLM:
+    """Pick the support agent's model from the environment (see the module docstring)."""
+    model = os.environ.get("LLM_MODEL")
+    if os.environ.get("ANTHROPIC_API_KEY") and not os.environ.get("LLM_BASE_URL"):
+        return AnthropicLLM(model, effort="medium") if model else AnthropicLLM(effort="medium")
+    if model:
+        return OpenAICompatibleLLM(
+            model,
+            base_url=os.environ.get("LLM_BASE_URL", "https://api.openai.com/v1"),
+            api_key=os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY"),
+        )
+    return ScriptedLLM(scripted_support)
+
+
+llm = choose_llm()
 
 support = Agent(
     app,
