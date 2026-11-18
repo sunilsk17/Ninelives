@@ -96,3 +96,39 @@ test("unknown runs show a clear error", async ({ page }) => {
   await page.goto("/#/runs/does-not-exist");
   await expect(page.getByRole("alert")).toContainText("workflow does-not-exist not found");
 });
+
+test("the nightly report runs from the schedules page and shows its children and progress", async ({ page }) => {
+  await page.goto("/#/schedules");
+  const row = page.getByTestId("schedule-row").filter({ hasText: "nightly-report" });
+  await expect(row).toContainText("0 2 * * *");
+  await row.getByRole("button", { name: "Pause" }).click();
+  await expect(row).toContainText("paused");
+  await row.getByRole("button", { name: "Resume" }).click();
+  await expect(row.getByRole("button", { name: "Pause" })).toBeVisible();
+  await row.getByRole("button", { name: "Run now" }).click();
+
+  await expect(page.getByTestId("run-id")).toHaveText(/^nightly-report@manual-/);
+  await expect(status(page)).toHaveText("succeeded", { timeout: 20_000 });
+  await expect(page.getByText("started by schedule")).toBeVisible();
+  const children = page.getByRole("region", { name: "Child runs" });
+  await expect(children.getByRole("link")).toHaveCount(2);
+  await expect(page.getByRole("region", { name: "Progress" })).toContainText('"done": 2');
+  await expect(page.getByRole("region", { name: "Output" })).toContainText('"audited": 2');
+
+  await children.getByRole("link").first().click();
+  await expect(page.getByTestId("run-id")).toHaveText(/\/\d+$/); // child ids are "<parent>/<step>"
+  await expect(page.getByText("child of")).toBeVisible();
+  await expect(status(page)).toHaveText("succeeded");
+});
+
+test("searching runs by id and seeing start options", async ({ page, request }) => {
+  await request.post("/api/workflows/expense", {
+    data: { args: ["searchable", 10], id: "find-me-123", priority: 5, concurrency_key: "team-a" },
+  });
+  await page.goto("/");
+  await page.getByLabel("Search run ids").fill("find-me");
+  await expect(page.getByTestId("run-row")).toHaveCount(1);
+  await page.getByRole("link", { name: "find-me-123" }).click();
+  await expect(page.getByTestId("run-options")).toContainText("priority 5");
+  await expect(page.getByTestId("run-options")).toContainText("key team-a");
+});

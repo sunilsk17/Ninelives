@@ -11,6 +11,7 @@ Start runs from the dashboard, or from the command line:
     ninelives start examples/shop.py:app checkout --args '["order-1", 4999]'
     ninelives start examples/shop.py:app expense --args '["dana", 1200]'
     ninelives start examples/shop.py:app agent:support --args '["Please refund order A-1001, it arrived broken"]'
+    ninelives schedules examples/shop.py:app trigger nightly-report   # the nightly report, right now
 
 The support agent needs a language model. With no configuration it uses a scripted stand-in, so
 the whole demo works offline. To use a real model, set one of:
@@ -132,6 +133,34 @@ async def expense(ctx: WorkflowContext, employee: str, amount: int) -> dict[str,
     return {"status": "paid", "receipt": await pay_out(employee, amount), "approved_by": decision.get("by")}
 
 
+# --------------------------------------------------------------------------- scheduled report
+@app.step()
+async def audit(order_id: str) -> dict[str, Any]:
+    order = ORDERS[order_id]
+    return {"order_id": order_id, "ok": order["status"] in ("delivered", "in transit")}
+
+
+@app.workflow()
+async def audit_order(ctx: WorkflowContext, order_id: str) -> dict[str, Any]:
+    return await audit(order_id)
+
+
+@app.workflow()
+async def daily_report(ctx: WorkflowContext) -> dict[str, Any]:
+    """Runs every night: audits each order in its own child run and publishes progress."""
+    order_ids = sorted(ORDERS)
+    await ctx.set_event("progress", {"done": 0, "of": len(order_ids)})
+    children = [await ctx.start_child(audit_order, order_id) for order_id in order_ids]
+    results = []
+    for done, child_id in enumerate(children, start=1):
+        results.append(await ctx.wait_child(child_id))
+        await ctx.set_event("progress", {"done": done, "of": len(order_ids)})
+    return {"audited": len(results), "problems": [r["order_id"] for r in results if not r["ok"]]}
+
+
+app.schedule("nightly-report", daily_report, "0 2 * * *")
+
+
 # --------------------------------------------------------------------------- support agent
 @tool
 def lookup_order(order_id: str) -> dict[str, Any]:
@@ -212,6 +241,7 @@ support = Agent(
     "support",
     llm=llm,
     tools=[lookup_order, refund],
+    publish_progress=True,
     system=(
         "You are the support agent for a small online shop. Look orders up before answering. "
         "Offer a refund only when the customer asks for one or the item arrived damaged."

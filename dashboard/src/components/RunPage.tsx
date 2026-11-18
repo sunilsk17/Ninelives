@@ -62,7 +62,34 @@ export function RunPage({ id }: { id: string }) {
                 at #{wf.fork_seq}
               </>
             )}
+            {wf.parent_id && (
+              <>
+                {" · child of "}
+                <a className="font-mono text-violet-700 hover:underline dark:text-violet-300" href={runHref(wf.parent_id)}>
+                  {wf.parent_id}
+                </a>
+              </>
+            )}
+            {wf.schedule_id && (
+              <>
+                {" · started by schedule "}
+                <a className="font-mono text-violet-700 hover:underline dark:text-violet-300" href="#/schedules">
+                  {wf.schedule_id}
+                </a>
+              </>
+            )}
           </p>
+          {(wf.priority !== 0 || wf.concurrency_key || wf.deadline) && (
+            <p className="mt-2 flex flex-wrap gap-2 text-xs" data-testid="run-options">
+              {wf.priority !== 0 && <Chip>priority {wf.priority}</Chip>}
+              {wf.concurrency_key && <Chip>key {wf.concurrency_key}</Chip>}
+              {wf.deadline && (
+                <Chip>
+                  {finished ? "deadline" : "times out"} {finished ? clock(wf.deadline) : ago(wf.deadline)}
+                </Chip>
+              )}
+            </p>
+          )}
         </div>
         {!finished && (
           <button type="button" className="btn-danger" onClick={() => act(() => api.cancel(id), "Cancellation requested.")}>
@@ -113,6 +140,43 @@ export function RunPage({ id }: { id: string }) {
         </section>
 
         <div className="space-y-6">
+          {data.events.length > 0 && (
+            <section className="card space-y-2 p-4" aria-label="Progress">
+              <h2 className="font-semibold">Progress</h2>
+              <dl className="space-y-2">
+                {data.events.map((e) => (
+                  <div key={e.key}>
+                    <dt className="flex items-baseline justify-between gap-2">
+                      <span className="font-mono text-xs font-medium">{e.key}</span>
+                      <span className="text-xs text-zinc-500">{ago(e.updated_at)}</span>
+                    </dt>
+                    <dd>
+                      <JsonView value={e.value} className="mt-1 max-h-40" />
+                    </dd>
+                  </div>
+                ))}
+              </dl>
+            </section>
+          )}
+          {data.children.length > 0 && (
+            <section className="card p-4" aria-label="Child runs">
+              <h2 className="mb-2 font-semibold">Child runs</h2>
+              <ul className="space-y-1.5 text-sm">
+                {data.children.map((c) => (
+                  <li key={c.id} className="flex flex-wrap items-center gap-2">
+                    <StatusBadge status={c.status} />
+                    <a className="font-mono text-xs text-violet-700 hover:underline dark:text-violet-300" href={runHref(c.id)}>
+                      {c.id}
+                    </a>
+                    <span className="text-xs text-zinc-500">
+                      {c.name}
+                      {c.parent_seq ? ` · from #${c.parent_seq}` : ""}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
           {wf.error && (
             <section className="card space-y-2 p-4" aria-label="Error">
               <h2 className="font-semibold text-rose-700 dark:text-rose-300">{wf.error.type}</h2>
@@ -149,6 +213,10 @@ export function RunPage({ id }: { id: string }) {
       </div>
     </div>
   );
+}
+
+function Chip({ children }: { children: ReactNode }) {
+  return <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">{children}</span>;
 }
 
 function BackLink() {

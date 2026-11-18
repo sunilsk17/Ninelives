@@ -1,8 +1,17 @@
 import type { Attempt, JournalEntry, Workflow } from "../api";
-import { clock, compactJson, duration } from "../util";
+import { clock, compactJson, duration, runHref } from "../util";
 import { Disclosure, JsonView } from "./ui";
 
-const KIND_ICON: Record<JournalEntry["kind"], string> = { step: "ƒ", sleep: "◷", signal: "✉", value: "≡" };
+const KIND_ICON: Record<JournalEntry["kind"], string> = {
+  step: "ƒ",
+  sleep: "◷",
+  signal: "✉",
+  value: "≡",
+  event: "◉",
+  child: "⑂",
+  send: "➚",
+  patch: "⚑",
+};
 
 const ENTRY_STYLE: Record<JournalEntry["status"], string> = {
   completed: "border-emerald-400 bg-emerald-50 text-emerald-700 dark:border-emerald-700 dark:bg-emerald-950 dark:text-emerald-300",
@@ -18,6 +27,10 @@ function describe(entry: JournalEntry): string {
     return out?.timeout ? "timed out" : "received";
   }
   if (entry.kind === "value") return "recorded";
+  if (entry.kind === "event") return "published";
+  if (entry.kind === "child") return "started";
+  if (entry.kind === "send") return `sent to ${(entry.output as { to?: string } | null)?.to ?? "?"}`;
+  if (entry.kind === "patch") return "new code path";
   return entry.status;
 }
 
@@ -101,7 +114,14 @@ export function Timeline({
                     <div className="text-sm text-rose-700 dark:text-rose-300">
                       <span className="font-mono text-xs">{entry.error.type}</span>: {entry.error.message}
                     </div>
-                  ) : entry.kind === "sleep" ? null : (
+                  ) : entry.kind === "sleep" || entry.kind === "patch" ? null : entry.kind === "child" ? (
+                    <a
+                      className="font-mono text-xs text-violet-700 hover:underline dark:text-violet-300"
+                      href={runHref(String((entry.output as { id?: string } | null)?.id ?? ""))}
+                    >
+                      → {String((entry.output as { id?: string } | null)?.id ?? "")}
+                    </a>
+                  ) : (
                     <Disclosure summary={<Summary entry={entry} />}>
                       <JsonView value={entry.output} className="max-h-96" />
                     </Disclosure>
@@ -158,6 +178,7 @@ function Summary({ entry }: { entry: JournalEntry }) {
     const payload = (entry.output as { payload?: unknown; timeout?: boolean } | null)?.payload;
     return <span className="font-mono">payload {compactJson(payload, 80)}</span>;
   }
+
   return <span className="font-mono">{compactJson(entry.output, 90)}</span>;
 }
 

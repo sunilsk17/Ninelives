@@ -9,11 +9,12 @@ const PAGE = 50;
 export function RunsPage({ stats }: { stats: Stats | null }) {
   const [status, setStatus] = useState<Status | undefined>();
   const [name, setName] = useState("");
+  const [q, setQ] = useState("");
   const [page, setPage] = useState(0);
   const [starting, setStarting] = useState(false);
   const { data, error } = usePoll(
-    () => api.list({ status, name: name || undefined, limit: PAGE + 1, offset: page * PAGE }),
-    [status, name, page],
+    () => api.list({ status, name: name || undefined, q: q.trim() || undefined, limit: PAGE + 1, offset: page * PAGE }),
+    [status, name, q, page],
   );
   const rows = data?.workflows.slice(0, PAGE) ?? [];
   const hasMore = (data?.workflows.length ?? 0) > PAGE;
@@ -57,6 +58,17 @@ export function RunsPage({ stats }: { stats: Stats | null }) {
               {total} total
             </span>
           </h2>
+          <input
+            type="search"
+            aria-label="Search run ids"
+            placeholder="Search run ids"
+            className="input w-full sm:w-56"
+            value={q}
+            onChange={(e) => {
+              setQ(e.target.value);
+              setPage(0);
+            }}
+          />
           <select
             aria-label="Workflow"
             className="input w-auto"
@@ -90,7 +102,7 @@ export function RunsPage({ stats }: { stats: Stats | null }) {
         )}
 
         {data && rows.length === 0 ? (
-          <Empty title={status || name ? "No runs match this filter" : "No runs yet"}>
+          <Empty title={status || name || q ? "No runs match this filter" : "No runs yet"}>
             Start one here, from code with <code className="font-mono">app.start(...)</code>, or with{" "}
             <code className="font-mono">ninelives start</code>.
           </Empty>
@@ -117,6 +129,8 @@ export function RunsPage({ stats }: { stats: Stats | null }) {
                       <div className="truncate text-xs text-zinc-500">
                         {w.name}
                         {w.forked_from && <span className="ml-1 text-violet-600 dark:text-violet-400">· fork</span>}
+                        {w.parent_id && <span className="ml-1 text-sky-600 dark:text-sky-400">· child</span>}
+                        {w.schedule_id && <span className="ml-1 text-amber-600 dark:text-amber-400">· scheduled</span>}
                       </div>
                     </td>
                     <td className="px-4 py-2.5">
