@@ -422,3 +422,16 @@ def test_many_processes_can_open_a_new_sqlite_database_at_once(tmp_path: Path) -
             with closing(sqlite3.connect(path)) as db:
                 assert db.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
                 assert db.execute("SELECT COUNT(*) FROM workflows").fetchone()[0] == 12
+
+
+async def test_fire_schedules_can_be_limited_to_declared_ids(store: Store) -> None:
+    await store.upsert_schedules(
+        [
+            ScheduleDef(id="kept", workflow="wf", cron="* * * * *"),
+            ScheduleDef(id="removed", workflow="wf", cron="* * * * *"),
+        ],
+        T0,
+    )
+    started = await store.fire_schedules(T0 + 61, ["wf"], ids=["kept"])
+    assert [r.split("@")[0] for r in started] == ["kept"]
+    assert await store.fire_schedules(T0 + 200, ["wf"], ids=[]) == []

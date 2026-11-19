@@ -522,3 +522,27 @@ async def test_run_until_idle_never_stops_with_work_left(store: Store, clock: Fa
     await app.worker(lease_ttl=10).run_until_idle()
     assert (await app.get(parent)).status == Status.SUCCEEDED
     assert [(await app.get(q)).status for q in queued] == [Status.SUCCEEDED] * 3
+
+
+async def test_a_schedule_removed_from_the_code_stops_firing(store: Store, clock: FakeClock) -> None:
+    def version(with_schedule: bool) -> Ninelives:
+        app = Ninelives(store, clock=clock)
+
+        @app.workflow(name="tick")
+        async def tick(ctx) -> None:
+            return None
+
+        if with_schedule:
+            app.schedule("every-minute", tick, "* * * * *")
+        return app
+
+    old = version(True)
+    await old.worker().run_until_idle()
+    clock.advance(61)
+    await old.worker().run_until_idle()
+    assert len(await store.list_workflows(schedule_id="every-minute")) == 1
+    new = version(False)  # deployed without the schedule
+    clock.advance(120)
+    await new.worker().run_until_idle()
+    assert len(await store.list_workflows(schedule_id="every-minute")) == 1
+    assert [s.id for s in await new.list_schedules()] == ["every-minute"]  # still listed, until deleted

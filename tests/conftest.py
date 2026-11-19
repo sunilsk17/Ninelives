@@ -33,6 +33,12 @@ async def _postgres_store() -> Store:
     return store
 
 
+async def reset_postgres() -> None:
+    """Empty the test database, for tests that build their own app instead of using `store`."""
+    store = await _postgres_store()
+    await store.close()
+
+
 BACKENDS = ["sqlite-memory", "sqlite-file"] + (["postgres"] if PG_DSN else [])
 
 

@@ -208,8 +208,11 @@ class Store(ABC):
         """Insert new schedules and update changed ones (the code is the source of truth)."""
 
     @abstractmethod
-    async def fire_schedules(self, now: float, names: Sequence[str], limit: int = 20) -> list[str]:
-        """Start runs for due schedules (exactly one starter per tick); returns the run ids."""
+    async def fire_schedules(
+        self, now: float, names: Sequence[str], limit: int = 20, ids: Sequence[str] | None = None
+    ) -> list[str]:
+        """Start runs for due schedules (exactly one starter per tick); returns the run ids.
+        Only schedules of the workflows in ``names`` fire, and only those in ``ids`` if given."""
 
     @abstractmethod
     async def list_schedules(self) -> list[Schedule]: ...

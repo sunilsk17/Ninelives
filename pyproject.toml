@@ -6,14 +6,31 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Sunil Kumar" }]
-keywords = ["durable-execution", "workflows", "ai-agents", "llm", "postgres", "fault-tolerance"]
+keywords = ["durable-execution", "workflows", "workflow-engine", "ai-agents", "llm", "postgres", "sqlite", "fault-tolerance", "cron", "asyncio"]
 classifiers = [
-  "Programming Language :: Python :: 3",
-  "Framework :: AsyncIO",
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
   "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Framework :: AsyncIO",
+  "Framework :: FastAPI",
+  "Topic :: Database",
+  "Topic :: Software Development :: Libraries :: Python Modules",
   "Topic :: System :: Distributed Computing",
+  "Typing :: Typed",
 ]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/sunilsk17/Ninelives"
+Documentation = "https://github.com/sunilsk17/Ninelives/tree/main/docs"
+Changelog = "https://github.com/sunilsk17/Ninelives/blob/main/CHANGELOG.md"
+Issues = "https://github.com/sunilsk17/Ninelives/issues"
 
 [project.optional-dependencies]
 postgres = ["asyncpg>=0.30"]
@@ -56,6 +73,8 @@ markers = [
 [tool.ruff]
 line-length = 110
 target-version = "py311"
+# Code samples in the docs are hand-formatted prose.
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "ASYNC", "SIM", "RUF"]

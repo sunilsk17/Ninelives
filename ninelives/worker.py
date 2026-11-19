@@ -108,7 +108,10 @@ class Worker:
                 self._schedules_registered = True
             if self.app.schedules and (force or clock >= self._next_schedule_check):
                 self._next_schedule_check = clock + self.schedule_interval
-                started = await store.fire_schedules(self.app.clock(), list(self.app.workflows))
+                # Only schedules declared in this code: one removed from the code stops firing.
+                started = await store.fire_schedules(
+                    self.app.clock(), list(self.app.workflows), ids=list(self.app.schedules)
+                )
                 for run_id in started:
                     log.info("schedule started %s", run_id)
             if self.retention is not None and clock >= self._next_purge:

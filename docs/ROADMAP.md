@@ -5,7 +5,7 @@ other teams can adopt: composition, flow control, schedules, change management, 
 developer experience. Every item ships with tests on SQLite and Postgres, docs, and (where visible)
 dashboard support.
 
-Status legend: ✅ done · 🚧 in progress · ⏳ planned
+Status legend: ✅ done · 🚧 in progress · ⏳ planned. All items shipped in v0.2.0 (see the [changelog](../CHANGELOG.md)).
 
 ## Work items, in build order
 
@@ -21,12 +21,12 @@ Status legend: ✅ done · 🚧 in progress · ⏳ planned
 | 8 | Cron schedules | Time-based work (§2) | ✅ |
 | 9 | Retention / purge | Operations (§2) | ✅ |
 | 10 | Postgres LISTEN/NOTIFY wake-ups | Latency (§2) | ✅ |
-| 11 | Testing helpers and a sync client | Developer experience (§4) | ⏳ |
-| 12 | API: tokens, events, schedules, metrics; CLI additions | Operations (§3.6, §4) | ⏳ |
-| 13 | Dashboard: sign-in, search, events, children, schedules | Debuggability (§3.2) | ⏳ |
-| 14 | Agents: progress events, parallel tool calls | Agents (§3.5) | ⏳ |
-| 15 | OpenTelemetry spans (optional dependency) | Observability (§3.6) | ⏳ |
-| 16 | Packaging, docs set, changelog, release workflow | Adoption (§4) | ⏳ |
+| 11 | Testing helpers and a sync client | Developer experience (§4) | ✅ |
+| 12 | API: tokens, events, schedules, metrics; CLI additions | Operations (§3.6, §4) | ✅ |
+| 13 | Dashboard: sign-in, search, events, children, schedules | Debuggability (§3.2) | ✅ |
+| 14 | Agents: progress events, parallel tool calls | Agents (§3.5) | ✅ |
+| 15 | OpenTelemetry spans (optional dependency) | Observability (§3.6) | ✅ |
+| 16 | Packaging, docs set, changelog, release workflow | Adoption (§4) | ✅ |
 
 ## Designs
 
@@ -147,3 +147,22 @@ dependency.
 - **Package:** version 0.2.0, `py.typed` and project URLs.
 - **Repository files:** `CHANGELOG.md`, `CONTRIBUTING.md` and `SECURITY.md`.
 - **Docs:** `docs/guide/` with one page per feature, plus a tag-triggered release workflow for PyPI trusted publishing. The repository owner enables it on PyPI; nothing is published automatically.
+
+## Also shipped in v0.2 (found while building)
+
+- **Generic model provider.** `OpenAICompatibleLLM` for any chat-completions API, including local
+  models, next to the Anthropic provider.
+- **Schedules declared in code.** Workers fire only the schedules their code declares, so removing
+  one from the code stops it.
+- **Four bug fixes found by repeated runs of the suites:**
+  - API routes for run ids containing `/`,
+  - concurrent first opens of a SQLite database,
+  - `run_until_idle` returning early,
+  - a stale execution kept alive by a re-claimed run.
+
+## Ideas for later
+
+- **Streaming** model output to the dashboard, outside the journal.
+- **Worker-version routing**, so runs only resume on compatible code.
+- **Batching and debouncing** of starts, in the style of Inngest.
+- **A hosted docs site** built from `docs/`.

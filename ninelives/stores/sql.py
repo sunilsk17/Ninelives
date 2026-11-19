@@ -1030,18 +1030,23 @@ class SqlStore(Store):
 
         await self._run(script)
 
-    async def fire_schedules(self, now: float, names: Sequence[str], limit: int = 20) -> list[str]:
-        """Start runs for due schedules of the given workflow types; returns the run ids started."""
-        if not names:
+    async def fire_schedules(
+        self, now: float, names: Sequence[str], limit: int = 20, ids: Sequence[str] | None = None
+    ) -> list[str]:
+        """Start runs for due schedules of the given workflow types (and, if ``ids`` is given,
+        only those schedules); returns the run ids started."""
+        if not names or (ids is not None and not ids):
             return []
+        only = f"AND id IN ({_marks(len(ids))}) " if ids is not None else ""
 
         def script() -> Script[list[str]]:
             due = yield rows(
                 f"SELECT {SCHEDULE_COLS} FROM schedules WHERE enabled = ? AND next_at <= ? "
-                f"AND workflow IN ({_marks(len(names))}) ORDER BY next_at LIMIT ? /*SKIP_LOCKED*/",
+                f"AND workflow IN ({_marks(len(names))}) {only}ORDER BY next_at LIMIT ? /*SKIP_LOCKED*/",
                 True,
                 now,
                 *names,
+                *(ids or ()),
                 limit,
             )
             started: list[str] = []

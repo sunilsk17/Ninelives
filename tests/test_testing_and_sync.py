@@ -11,7 +11,7 @@ import pytest
 from ninelives import Ninelives, StartOptions, SyncClient, WorkflowFailed
 from ninelives.testing import FakeClock, TestEnv
 
-from .conftest import PG_DSN
+from .conftest import PG_DSN, reset_postgres
 
 
 def build(store: str) -> Ninelives:
@@ -107,6 +107,7 @@ def test_sync_client_from_plain_code(backend: str, tmp_path: Path) -> None:
     if backend == "postgres":
         if not PG_DSN:
             pytest.skip("needs NINELIVES_TEST_POSTGRES_DSN")
+        asyncio.run(reset_postgres())
         store = PG_DSN
     else:
         store = f"sqlite:///{tmp_path}/sync.db"
