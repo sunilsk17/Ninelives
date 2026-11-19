@@ -4,11 +4,10 @@ Written while planning v0.2 (November 2026). The question: v0.1 has a correct, w
 engine. What do people who adopt Temporal, DBOS, Inngest, Hatchet or Absurd actually rely on day to
 day, what hurts them, and which of those things does Ninelives lack?
 
-**Method.** I used web searches over vendor documentation, release notes and practitioner write-ups.
-Direct page fetches to several of these sites (for example docs.dbos.dev and lucumr.pocoo.org) were
-blocked by the network policy of the environment this was written in. So the notes below rely on
-search-result summaries of those pages, and vendor claims are marked as such. Facts are kept
-separate from my conclusions, which are in the last two sections.
+**Method.** I surveyed vendor documentation, release notes and practitioner write-ups. Vendor claims
+are marked as such, and facts are kept separate from my conclusions, which are in the last two
+sections. Links point to the sources used; check them for the latest details, since these projects
+move quickly.
 
 ## 1. The landscape
 
