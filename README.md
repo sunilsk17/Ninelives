@@ -9,7 +9,7 @@ step: nothing is done twice, nothing is lost.
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 
-![A checkout run in the dashboard: the payment step failed four times, its worker was killed, and a second worker finished it](docs/images/run-timeline.png)
+![A checkout run in the dashboard: the payment step failed twice, its worker was killed, and a second worker finished it on the third attempt](docs/images/run-timeline.png)
 
 ```python
 from ninelives import Ninelives, step_info
