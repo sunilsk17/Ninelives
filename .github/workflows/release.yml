@@ -14,6 +14,12 @@ on:
     types: [published]
   workflow_dispatch:
 
+# Publishing a release on GitHub also creates its tag, which fires both triggers above. Run them
+# one after the other so they never upload the same files at the same time.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
