@@ -1,6 +1,8 @@
 name: Release
 
-# Push a tag like v0.2.0 to build the wheel and sdist and attach them to a GitHub release.
+# Builds the wheel and sdist and attaches them to the GitHub release. Either push a tag like
+# v0.2.0 (the release is created for you), or publish a release with a new v* tag on GitHub's
+# Releases page (the files are added to it). Running twice is harmless.
 # Publishing to PyPI is off until you configure it: add PyPI as a trusted publisher for this
 # repository (workflow release.yml, environment "pypi") and set the repository variable
 # PUBLISH_TO_PYPI to "true".
@@ -8,6 +10,8 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  release:
+    types: [published]
   workflow_dispatch:
 
 jobs:
@@ -49,10 +53,16 @@ jobs:
         with:
           name: dist
           path: dist
-      - name: Create the GitHub release
+      - name: Create the GitHub release, or add the files to an existing one
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes "See CHANGELOG.md for what changed."
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
+              --title "$GITHUB_REF_NAME" --notes "See CHANGELOG.md for what changed."
+          fi
 
   pypi:
     needs: build
@@ -67,3 +77,5 @@ jobs:
           name: dist
           path: dist
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
